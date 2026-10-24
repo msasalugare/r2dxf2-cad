@@ -5,6 +5,8 @@
 
 pub mod calibration;
 pub mod geometry;
+pub mod mask;
+pub mod ridge;
 
 // Modules are added as their milestones land (M2..M7):
 // pub mod calibration;

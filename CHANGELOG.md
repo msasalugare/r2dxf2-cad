@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **M4** mask core (`rf-core::mask`): vector strokes (brush / polygon / rect,
+  include / exclude) resolved to a per-pixel weight map in raster coordinates,
+  with antialiased linear-feather coverage and the `default none once include`
+  base rule. Native tests cover T12 neutrality (disabled == all-include,
+  bit-identical), include/exclude resolution, and integer-translation
+  invariance (T11).
+
+- **M3** ridge/centerline core (`rf-core::ridge`): background-normalized darkness,
+  multi-scale Hessian ridge response (`σ ∈ {1.0, 1.5, 2.5}`, scale-normalized,
+  max over scales), non-maximum suppression along the normal, sub-pixel
+  quadratic localization, and tangent direction + strength. Native T2 tests:
+  centerline < 0.15 px clean and < 0.3 px noisy for vertical/diagonal lines.
+
 - **M2** calibration: `rf-core::calibration` solvers (isotropic scale, anisotropic
   sx/sy, affine 2×3, rotation) plus per-segment residuals, leave-one-out, and
   warnings, with native T1 acceptance tests (scale < 0.05 %, rotation < 0.02°).

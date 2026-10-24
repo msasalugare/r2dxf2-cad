@@ -89,6 +89,38 @@ resolved from the live registries on 2026-10-24.
   image. The segment `Angle` orientation and sub-pixel ridge snap are deferred
   to M3 (ridge).
 
+## M3 ridge decisions
+
+- **Placement**: ridge detection is pure Rust in `rf-core::ridge` and tested
+  natively (T2). It is deliberately NOT mirrored in TypeScript: ridge is the
+  first truly heavy pipeline stage and belongs behind the WASM bridge (the
+  wasm toolchain is still deferred in this environment).
+- **Algorithm**: background-normalized darkness (large box blur via an integral
+  image, `darkness = max(0, background − gray)`), per-scale Gaussian smoothing
+  followed by a central finite-difference Hessian, the ridge response `−λ₁`
+  (smaller eigenvalue) with `σ²` scale normalization and max over
+  `σ ∈ {1.0, 1.5, 2.5}`, non-maximum suppression along the normal, and a Taylor
+  sub-pixel step `δ = −(∇D·n)/λ₁` (the quadratic across-profile interpolation).
+  Tangent direction comes from the Hessian's weaker eigenvector.
+- **Deferred**: per-tile laziness with a halo, caching keyed by
+  `(raster hash, params)`, the spatial index, and the exact-EDT attraction-field
+  pyramid are performance work tied to the browser/WASM integration (T6).
+
+## M4 mask decisions
+
+- **Source of truth**: the mask is a list of vector strokes
+  (`include`/`exclude` × `brush`/`polygon`/`rect`) in raster pixel coordinates,
+  resolved to a per-pixel weight map `W ∈ [0,1]`; anchoring to raster coords is
+  what keeps the mask aligned with the background under transforms (T11).
+- **Coverage model**: signed distance to the stroke boundary (negative inside),
+  mapped to coverage with a linear feather band `cov = clamp(0.5 − d/(2·feather))`;
+  include `W = max(W, cov)`, exclude `W = min(W, 1 − cov)`. Base mode is
+  `none` once an include stroke exists, otherwise `all`; `enabled=false` is
+  bit-identical to an all-included mask (T12).
+- **Deferred**: the interactive brush/polygon/rect/eraser tools, the bitmap
+  cache (1/1…1/4 resolution, tiled/lazy), and the overlay are browser UI tied to
+  the WASM bridge; the fitter-only mask acceptance (T9/T10) lands in M6.
+
 ## Docker
 
 - **`node:24-alpine`** (web stage) — matches the pinned Node 24 LTS.
