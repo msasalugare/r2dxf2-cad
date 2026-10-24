@@ -1,0 +1,151 @@
+# ZADATAK: "RasterFit" – dokerizovana Rust/WASM web aplikacija za fitovanje parametarske 2D skice (sa constraintima) na kalibrisan raster crtež, uz masku
+
+Pišeš od nule. Sve radi lokalno u browseru (bez naloga, uploada, analitike, telemetrije); server je samo statički nginx u Docker kontejneru. Cilj: precizan, minimalistički alat u duhu https://userfypp.github.io/plan-measure/ (referenca ZA IZGLED I PONAŠANJE, ne za kopiranje koda ili asseta).
+
+Korisnički tok: uvezem PDF ili PNG → kalibrišem (poželjno sa više dužina) → preko skeniranih rasterskih linija crtam SKICU sa constraintima → alat fituje moju geometriju zajedno sa constraintima u postojeći raster; pozadina se skalira pri kalibraciji, a slobodnim komandama i/ili tokom fitovanja precizno rotira da ispoštuje constrainte. Opciono "maskom" (poluprovidni marker) označim deo rastera koji se koristi u fitovanju.
+
+## 0. Pravila rada
+- FAZA 0 (pre bilo kog koda): proveri okruženje i zapiši u docs/ENV.md: `docker version`, `docker info` (da li daemon radi), `docker buildx version`, `rustup target list --installed` (wasm32-unknown-unknown), verzije Rust-a i Node-a, pristup registrijima (crates.io, npm, static.rust-lang.org). Ako nešto ne radi: STOP za tu stavku, reci tačno šta nedostaje, nastavi sa onim što može da se proveri drugačije i jasno označi šta je ostalo NEPROVERENO. Nikad ne glumi uspešan build.
+- Ništa o spoljnim bibliotekama/API-ju ne pretpostavljaj iz sećanja: pre upotrebe proveri aktuelnu dokumentaciju i verziju (crates.io, npm, MDN, Docker Hub) i zapiši u docs/DECISIONS.md šta si odabrao i zašto (verzije, licence, veličina, održavanost). Zavisnosti su lean; svaka nova uz obrazloženje.
+- Radi po miljokazima M0–M8 (odeljak 13). Posle svakog: pokreni sve testove, prikaži rezultate i screenshotove, pa tek onda sledeći. Ako kriterijum ne prolazi: STOP, izmeri, predloži alternativu, ne menjaj tiho specifikaciju.
+- Sve što utiče na preciznost računaj u f64 (Rust i JS); f32 samo za velike rasterske bafere.
+- Jezik UI-ja: srpski (latinica) + engleski, mali rečnik, podrazumevano prema navigator.language. Kod, komentari i docs na engleskom.
+
+## 1. Stil i UX (minimalizam, po uzoru na Plan Measure)
+- PRVO otvori živu referencu, prođi kroz tok (start ekran, otvaranje, kalibracija, merenja, paneli, tooltips, popover, tastatura, tamna/svetla tema), napravi screenshotove u docs/reference/ i izvuci vizuelne tokene (paleta, tipografija, razmaci, radijusi, senke, trajanja animacija) u src/styles/tokens.css. Što ne možeš da utvrdiš, odluči ti, ali ostani u istom duhu.
+- Startni ekran: tačkasta mreža kao pozadina viewera; jedna mirna kartica: naslov, "Open PDF / image", "Try a sample", jedna rečenica o privatnosti. Drag-and-drop preko celog prozora.
+- Jedna traka alata (ikone kao inline SVG, bez icon biblioteka), jedan bočni panel koji se otvara po potrebi (Calibration / Mask / Fit / Pages), status traka (koordinate kursora u mm, zoom, DoF, aktivni alat). Bez modalnih dijaloga osim potvrde destruktivnih akcija.
+- Meki fade prelazi umesto treptanja placeholdera; poštuj prefers-reduced-motion i prefers-color-scheme; vidljiv fokus; ceo tok upotrebljiv tastaturom; tooltip svuda pokazuje prečicu. Brojevi sa tabularnim ciframa.
+- Bez UI frameworka: TypeScript + web components ili čist DOM; Canvas za viewer. Početni JS ≤ 150 KB gzip (bez PDF.js, koji se lazy/preload-uje kao u referenci), WASM ≤ 1.5 MB gzip.
+- Desktop-first (aktuelni Chrome, Edge, Firefox, Safari), pen/touch za pan/zoom i crtanje maske; mobilni layout bez horizontalnog overflowa.
+
+## 2. Arhitektura
+- Cargo workspace: crates/rf-core (čist Rust, bez wasm zavisnosti, `cargo test` nativno), crates/rf-wasm (wasm-bindgen sloj), web/ (Vite + TypeScript), tools/ (generator sintetike, CLI za regresione testove), docker/ (nginx.conf, skripte).
+- rf-core moduli: raster (piramida, tile), calibration, ridge, mask, geometry, constraints, solver (KKT), fitter, report, dxf/svg export, project (serde).
+- Teški rad u Web Worker-ima; JS↔WASM granica: typed arrays (bulk) + mali serde-JSON/serde-wasm-bindgen (struktura). BEZ SharedArrayBuffer/wasm-threads: isti build mora da radi i na statičkom hostingu bez COOP/COEP zaglavlja (npr. GitHub Pages), iako nginx u kontejneru može da ih šalje. Paralelizam = više Worker-a sa sopstvenim WASM instancama i transferable baferima po tile-u. Build sa simd128 uz proveru podrške i fallback bez SIMD-a ako je potrebno.
+- Fit radi KORAK-PO-KORAK API (worker izvrši jednu iteraciju i vrati stanje) da Cancel bude trenutan i UI responzivan; alternativa: terminate+restart sa poslednjim prihvaćenim stanjem.
+- Memorija: wasm32 limit; A3@600dpi ≈ 70 MP → 8-bit gray ≈ 70 MB. Nikad ne držati pune f32 mape celog rasterskog polja; računati po tile-ovima sa halo ivicom, samo u bounding box-u skice + margina (default 5 % ili 200 px).
+- Isporuka: primarno Docker slika koja servira statički build; isti `dist/` mora da radi i na GitHub Pages (base path preko build argumenta VITE_BASE, default "/"). Aplikacija je potpuno klijentska: kontejner nema backend, bazu ni volume-ove; podaci ostaju u browseru (IndexedDB).
+- Licenca MIT. Node 24 LTS (pinovan), lockfile-ovi obavezni (Cargo.lock i package-lock.json).
+
+## 3. Koordinate i model
+- World = mm, y-gore, f64. Raster = pikseli, y-dole, centar piksela (i+0.5, j+0.5). Afina T: raster → world: p = A·[u,v]ᵀ + t, A = R(θ)·diag(sx, −sy)·(opciono shear). Jedinice prikaza: mm/cm/m/in.
+- Geometrija: Point, Line (2 tačke), Circle (centar + r), Arc (centar, r, uglovi; pri crtanju i 3 tačke), Construction flag. Stabilni ID-jevi elemenata.
+- Constraintovi (v1): Coincident, PointOnObject, Horizontal, Vertical, Parallel, Perpendicular, Tangent (linija–kružnica/luk, kružnica–kružnica), Equal (dužina/radijus), Symmetric, Midpoint, Collinear, Fixed (lock), Distance (tačka–tačka, tačka–linija; horizontalna/vertikalna projekcija), Angle, Radius/Diameter. Svaki ima residual funkciju + analitički Jacobian (ili dual-number autodiff) i driving/reference flag.
+- Projekat (serde, verzionisan šemom): raster ref + hash, T, kalibracija, geometrija, constraintovi, maska (potezi u koordinatama rastera), postavke fita, poslednji izveštaj.
+
+## 4. Uvoz
+- PNG/JPEG/WebP preko createImageBitmap; PDF preko PDF.js (preload sa start ekrana; worker i fontovi isporučeni LOKALNO, bez CDN-a). Limit veličine fajla (default 100 MB, konfigurabilno), jasna greška za šifrovane/oštećene fajlove.
+- PDF skeniran kao jedna slika: izvući ugrađenu sliku u NATIVNOJ rezoluciji (proveri kroz PDF.js operator list; CCITT/JBIG2 skenove dekodira PDF.js); ako to ne uspe, renderuj na izabranom DPI (default 600) po TILE-ovima (limiti veličine canvasa, posebno Safari). Višestrani PDF: Previous/Next + Pages panel; kalibracija i skica su PO STRANI.
+- Vektorski PDF: upozorenje da je alat za raster; ponudi render na DPI.
+- TIFF (opciono, M8): Rust `tiff` crate; proveri podršku za CCITT; ako je nema, zapiši ograničenje.
+- Dekodiran gray8 bafer + piramida žive u worker-u; originalni blob u IndexedDB (zasebno od metapodataka).
+
+## 5. Viewer
+- Canvas2D sa tile-ovanom piramidom (ImageBitmap tile-ovi), pan/zoom sa f64 transformacijom, zoom ka kursoru, 60 FPS na A3@600dpi. WebGL2 samo ako profiling pokaže da je potreban; odluku zapiši.
+- Slojevi: tačkasta mreža → raster (opacity, invert, kontrast) → maska (overlay) → skica → rezidual heat-map → interaktivni handle-ovi → HUD. Poštuj devicePixelRatio; pointer events sa getCoalescedEvents za kist.
+- Pozadina se skalira pri kalibraciji, a rotira/pomera slobodnim komandama (Move, Rotate numerički i interaktivno oko pivota sa korakom ±0.01°, Scale, Flip H/V, Lock, Opacity, Invert) i tokom fita.
+
+## 6. Kalibracija (više dužina)
+- Alat "Calibrate": dve tačke po segmentu (subpixel snap na lokalni ridge u r≈6 px; Alt isključuje snap; lupa 8×), unos dužine sa jedinicama ("125", "12.5 cm", "4.921 in"), oznaka orijentacije: free/H/V/ugao. Tabela segmenata (uključi/isključi, obriši) u panelu; uživo preview skaliranja pozadine pre potvrde.
+- Rešavanje: (a) izotropno: s = Σ(d_k/L_k) / Σ(d_k²/L_k²) (minimizuje Σ((s·d_k−L_k)/L_k)²); (b) anizotropno (sx, sy) kad postoji ≥1 H i ≥1 V segment (traži oba pravca, kao što referenca traži X i Y); (c) afino iz ≥3 nekolinearne tačke sa poznatim koordinatama (LS 2×3); (d) rotacija θ iz H/V/ugao segmenata: težinska cirkularna sredina odstupanja (težina = dužina).
+- Izveštaj: rezidual po segmentu (mm i %), leave-one-out provera, upozorenja (max > 0.3 %, K<2, skoro paralelni ili kratki segmenti < 30 % stranice).
+- "Level": dve tačke na liniji koja mora biti H ili V → tačno rotira pozadinu. Numerički unos ugla i interaktivna rotacija oko izabranog pivota.
+
+## 7. Ridge/centerline (rf-core::ridge)
+- Gray → normalizacija pozadine (velika Gauss/morfološka estimacija) → tamnoća. Hessian ridge na σ ∈ {1.0, 1.5, 2.5} px (scale-normalizovano, max po skalama), NMS duž normale, subpixel poprečna kvadratna interpolacija, lokalni pravac, jačina.
+- Računa se na rasteru BEZ maske; lazy, po tile-ovima sa halo ivicom, keširano po (hash rastera, parametri). Prostorni indeks (grid hash) + piramida polja privlačenja (exact EDT, ≥4 nivoa) nad kandidatima koji su prošli maskiranje.
+- Promena samo maske NE ponavlja filter, samo filtrira kandidate i gradi polje privlačenja.
+
+## 8. Maska
+- Mapa težina W(u,v)∈[0,1] u koordinatama RASTERA (zato se prirodno pomera/rotira/skalira sa pozadinom). Izvor istine = vektorski potezi: {mode: include|exclude, type: brush|polygon|rect, radius_px, points_px, order}; bitmapa je keš (1/1…1/4 rezolucije, tile-ovana, lazy).
+- Razrešenje: start MaskBaseMode (all=1 / none=0; default none čim postoji include potez, inače all); include: W=max(W,cov), exclude: W=min(W,1−cov); cov antialiasovan; feather Gauss σ=MaskFeatherPx (default 3).
+- Primena na RASTERSKOJ strani: kandidat c ima težinu w_c=W(c), odbacuje se ako je w_c<0.5 (prag podesiv). Uzorak skice bez kandidata u masci se odbacuje (ne kažnjava) i ulazi u pokrivenost.
+- Alati: kist ("poluprovidni marker", prečnik u px ekrana ili mm, resampling + RDP tol 0.25 px), lasso/poligon, pravougaonik, gumica; Include (zeleno) / Exclude (crveno); tasteri: X zamena moda, [ ] veličina, B/L/R/E, undo/redo po potezu, Shift+klik prava linija, razmak/Alt+prevlačenje pan. Dugmad: "Mask from sketch" (dilatacija elemenata skice za R px, default 12), Invert, Clear, Fill all/none, Show only masked. Overlay poluprovidan (default 0.35), ≥ 60 FPS tokom crtanja.
+- MaskEnabled=false i maska "sve uključeno" daju identičan rezultat.
+
+## 9. Skica (minimalni parametarski editor)
+- Alati: Select, Point, Line/Polyline, Circle, Arc (centar+2 tačke i 3 tačke), Dimension. Auto-constrainti pri crtanju (sa isključivanjem): snap na coincident/on-object, horizontalno/vertikalno uz toleranciju ugla, tangent pri nastavku luka; snap na ridge za postavljanje tačaka na raster (subpixel).
+- Panel constrainta: lista sa ikonama, selekcija povezanih elemenata, brisanje, prebacivanje driving/reference; dvoklik na dimenziju = unos vrednosti (labele sa podesivom bojom).
+- Prevlačenje tačaka/linija/kružnica rešava constrainte uživo; indikator DoF (n − rank) i boje: potpuno određeno / podređeno / konflikt (sa označenim uzrokom).
+- Undo/redo (komandni log), kopiranje/lepljenje, brisanje sa čišćenjem zavisnih constrainta.
+
+## 10. Solver i Fitter
+Solver (rf-core::solver):
+- Vlastiti LM/Gauss–Newton nad parametrima geometrije; Jacobian analitički (ili dual-number autodiff); nalgebra za lin. algebru (dense do ~1500 parametara; iznad toga CG nad normalnim jednačinama – prag i odluku zapiši).
+- Analiza ranga Jc (QR/SVD sa tolerancijom): DoF, redundantni i konfliktni constraintovi (sa identifikacijom podskupa).
+- Projekcija na c(q)=0 do ‖c‖∞ < 1e-9 mm (Newton posle konvergencije).
+Fitter:
+- Nepoznate: q (geometrija; construction izuzeta osim ako je uključeno) i T=(θ, tx, ty, opciono s, shear). Constraintovi su "istina": ako raster ne zadovoljava constrainte, menja se POZADINA (T), ne constraint.
+- Uzorkovanje: ~1 uzorak/px po dužini luka (pozicija x_i, tangenta τ_i).
+- Rezidual (point-to-LINE): r_i = sqrt(w_c)·ρ(n_c·(x_i − c)) + λ·sin∠(τ_i, φ_c); c = najbliža MASKIRANA centerline tačka u radijusu R (piramida 24→12→6→3 px); w_c iz maske; λ≈0.5 px-ekv; ρ = Cauchy/Tukey sa adaptivnom skalom (MAD, ≈1.5 px). Opciono: Harris/L-ugao rezidual za endpoint-e tagovane kao "korner".
+- Korak: KKT sistem [JᵀJ+μD, Jcᵀ; Jc, −εI][δ; λ] = [−Jᵀr; −c] (Levenberg prigušenje μ, regularizacija ε za redundantne constrainte), prihvatanje po merit funkciji (‖r‖² + penalty·‖c‖²), pa završna projekcija. Faze po nivou piramide: (1) samo T (ICP/Umeyama), (2) samo q, (3) zajednički dok max pomeraj < 0.02 px i ΔE/E < 1e-4.
+- Gauge: ako skica nema apsolutnu orijentaciju ili fiksnu tačku, θ i t su redundantni sa q → detektuj rang-deficijenciju po T komponentama, uvedi mali Tikhonov prior, prijavi korisniku. Scale pozadine je zaključan na kalibraciju; "Refine scale" samo kad postoje driving dimenzije.
+- Opcije: Fit geometry, Fit rotation, Fit translation, Fit scale, Affine/shear, Include construction, Use mask, Max iterations, Capture radius, Robust scale; Preview (bez komita) / Apply (jedan undo korak) / Cancel.
+- Izveštaj: RMS (px i mm), medijan, 95. percentil, % inlijera, % uzoraka bez kandidata u masci, pokrivenost po primitivi (< 30 % → upozorenje), promene θ/t/s sa ± (iz (JᵀJ)⁻¹), heat-map boja po elementu. Dijagnoza "maska preuska za capture radius".
+
+## 11. Persistencija i izvoz
+- Autosave jedne sesije u IndexedDB (mali idb-stil wrapper; blob rastera zasebno od verzionisanih metapodataka); pri učitavanju eksplicitni Continue/Discard; ako je storage nedostupan, radi u memoriji uz upozorenje.
+- Save/Open projekat: jedan fajl (zip: project.json + raster; fflate), File System Access API gde postoji, inače download.
+- Izvoz: DXF (LINE, CIRCLE, ARC; slojevi geometry/construction; mm; otvara se u FreeCAD/LibreCAD – proveri), SVG, JSON izveštaj fita + CSV tabela po primitivi. Opciono (M8): FreeCAD .FCMacro koji kreira Sketch sa geometrijom I constraintima (proveri API u dokumentaciji FreeCAD-a pre pisanja).
+
+## 12. Docker
+12.1 Dockerfile (višestepeni, BuildKit):
+ - Stage `wasm`: Rust image pinovan na tačnu verziju i digest (ARG), `rustup target add wasm32-unknown-unknown`, `cargo build --release --target wasm32-unknown-unknown --locked`, wasm-bindgen CLI PINOVAN na ISTU verziju kao wasm-bindgen crate u Cargo.lock (neslaganje verzija je najčešća greška: dodaj proveru koja obara build ako se razlikuju), `wasm-opt -O3` (binaryen) sa SIMD-om. Cargo registry i target keširati preko `--mount=type=cache`.
+ - Stage `web`: Node 24 LTS (pinovan), `npm ci`, kopira wasm pkg iz prethodnog stage-a, `vite build` sa VITE_BASE.
+ - Stage `test` (ciljan sa `--target test`): `cargo test`, `cargo clippy -D warnings`, `cargo fmt --check`, `npm run lint`, `vitest`; mora da prolazi.
+ - Stage `runtime`: nginx-unprivileged (ili alpine sa non-root korisnikom), samo `dist/` + nginx.conf; port 8080; cilj slike < 30 MB.
+ - Arhitekture: linux/amd64 i linux/arm64 preko buildx-a (npr. za Orange Pi 5); funkcionalno isti rezultat.
+ - .dockerignore (node_modules, target, .git, dist, veliki docs/reference).
+12.2 nginx.conf:
+ - MIME: `application/wasm` za .wasm; ispravni za .js/.mjs/.css/.svg/.json/.woff2.
+ - Kompresija: gzip (i brotli ako je modul dostupan u izabranoj slici; proveri) za js/css/wasm/svg/json.
+ - Keš: fingerprintovani asseti `public, max-age=31536000, immutable`; index.html (i service worker, ako postoji) `no-cache`.
+ - SPA fallback na index.html samo za rute bez ekstenzije.
+ - Zaglavlja: Content-Security-Policy (default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:; img-src 'self' blob: data:; style-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none') – testiraj da WASM i PDF.js worker rade pod njom i popravi minimalno ako ne rade; X-Content-Type-Options nosniff; Referrer-Policy no-referrer; Permissions-Policy bez kamere/mikrofona/lokacije.
+ - `/healthz` vraća 200 (bez logovanja).
+ - Bez poziva ka spoljnim domenima u runtime-u: fontovi self-hosted, PDF.js worker i WASM lokalno.
+12.3 compose.yaml i Makefile:
+ - Servis `rasterfit`: build, ports "8080:8080", restart: unless-stopped, healthcheck na /healthz, read_only: true sa tmpfs za /tmp i nginx cache/run, cap_drop: [ALL], security_opt: [no-new-privileges:true], bez volume-ova.
+ - Makefile (ili justfile): `make build`, `make run`, `make test` (test stage), `make e2e`, `make multiarch`, `make clean`.
+12.4 CI (GitHub Actions): build `test` stage, build runtime slike (amd64 + arm64), pokreni kontejner, sačekaj healthcheck, Playwright e2e protiv http://localhost:8080, provera veličine slike, opciono Trivy; zaseban job za deploy `dist/` na Pages.
+
+## 13. Miljokazi
+M0 Kostur: workspace, Dockerfile + compose + nginx (prazna aplikacija već radi u kontejneru), CI, tokens.css iz reference, start ekran, tema, i18n, e2e smoke.
+M1 Uvoz + viewer: PNG i PDF (PDF.js), tile piramida, pan/zoom 60 FPS, IndexedDB autosave sa Continue/Discard.
+M2 Kalibracija: segmenti, solveri (a–d), Level, izveštaj. Testovi T1.
+M3 Ridge: tile-ovan, subpixel, orijentacija, keš. Testovi T2, T6.
+M4 Maska: potezi, bitmapa, overlay, Mask from sketch. Testovi T9–T12.
+M5 Skica + solver: geometrija, constraintovi, DoF, drag, undo. Testovi T13.
+M6 Fitter: T faza, q faza, zajednički KKT, gauge, izveštaj, heat-map. Testovi T3–T5.
+M7 Izvoz i politura: DXF/SVG/JSON, zip projekat, pristupačnost, performanse, dokumentacija, finalni Docker kriterijumi D1–D7.
+M8 Opciono: TIFF, FCMacro, PWA offline.
+
+## 14. Testovi i kriterijumi prihvatanja
+Nativno `cargo test`, wasm-bindgen-test, vitest, Playwright. Sintetika (tools/): antialiasovane (supersampling) linije/kružnice/lukovi poznate geometrije, Gauss šum, JPEG kompresija, rotacija pozadine 0.3°, anizotropija skale 0.2 %, tekst/kote kao distraktori.
+ T1 Kalibracija: 3 segmenta (H, V, kosi) → greška skale < 0.05 %, rotacije < 0.02°; anizotropni mod vraća sx/sy sa < 0.05 %.
+ T2 Ridge: sub-pixel greška centerline-a < 0.15 px čisto, < 0.3 px sa šumom.
+ T3 Fit: skica sa ofsetom do 4 px i uglovnom greškom do 1°, constraintovi H/V/Parallel/Perpendicular/Coincident/Distance → RMS < 0.3 px, ‖c‖∞ < 1e-9 mm, rotacija pozadine rekonstruisana ≤ 0.02°.
+ T4 Robusnost: 20 % uzoraka prekriveno tekstom/kotama → promena rezultata < 0.1 px.
+ T5 Gauge: skica bez orijentacionih constrainta → bez drifta θ (> 0.01°) i upozorenje.
+ T6 Performanse (A3@600dpi, skica od 200 primitiva, 4 worker-a): dekodiranje < 5 s, ridge u bbox-u < 10 s, jedan Fit < 5 s, pan/zoom 60 FPS.
+ T7 Persistencija: save/load (zip i IndexedDB) → identičan T, geometrija, constraintovi, maska (hash bitmape).
+ T8 Regresija: realni skenirani A3/A4 mašinski crteži (300–600 dpi) sa papirnim iskrivljenjem; izveštaj sa rezidualima (fixtures obezbeđuje korisnik; do tada sintetika).
+ T9 Maska i distraktori: glavna linija i lažna paralelna na 3 px; sa include maskom RMS < 0.3 px, ofset ka lažnoj < 0.05 px.
+ T10 Invarijantnost granice maske: pomeranje granice ±5 px bez linija menja rezultat < 0.05 px.
+ T11 Maska kroz transformacije: ostaje poravnata sa istim pikselima rastera (< 0.01 px).
+ T12 Neutralnost: isključena maska = maska "sve uključeno" (bit-identično u istom build-u).
+ T13 Solver: analitički Jacobian vs konačne razlike (rel. greška < 1e-6) za svaki tip constrainta; poznati DoF slučajevi; detekcija redundantnih i konfliktnih setova; nasumične skice zadržavaju constrainte posle drag-a (‖c‖∞ < 1e-9).
+ T14 Izvoz: DXF se ponovo čita parserom (dev zavisnost), geometrija se poklapa < 1e-6 mm; ručna provera otvaranja u FreeCAD-u/LibreCAD-u zabeležena u docs/.
+ T15 UI/pristupačnost: e2e kroz tastaturu (uvoz → kalibracija → crtanje → fit → izvoz), axe bez ozbiljnih prekršaja, prefers-reduced-motion i tema.
+ D1 `docker compose up --build` na čistoj mašini daje radnu aplikaciju na http://localhost:8080 bez dodatnih koraka.
+ D2 Healthcheck "healthy" u roku od 10 s; kontejner radi kao non-root, sa read-only fajl sistemom.
+ D3 WASM se servira kao `application/wasm`, bez CSP prekršaja u konzoli; PDF.js radi iz lokalnog worker-a.
+ D4 Playwright e2e (sample slika → kalibracija → crtanje → izvoz DXF) prolazi protiv kontejnera.
+ D5 Slika < 30 MB; ponovni build bez izmena koristi keš i traje < 60 s.
+ D6 Build prolazi na linux/amd64 i linux/arm64; verzija wasm-bindgen CLI se poklapa sa lockfile-om (provera u build-u).
+ D7 Posle učitavanja stranice isključi mrežu: aplikacija i dalje radi (nema runtime zavisnosti ka spolja).
+Numerička reproducibilnost native vs WASM: tolerancija 1e-9 relativno (ne bit-identično, zbog razlika u libm).
+
+## 15. Isporuka
+Radna aplikacija u Docker kontejneru (`docker compose up`) i kao statički `dist/` (GitHub Pages); README (privatnost, tok rada, tasteri, Docker uputstvo, ograničenja), docs/ENV.md, docs/DECISIONS.md, docs/ALGORITHM.md (formule iz odeljaka 6–10), docs/FILE_FORMAT.md, docs/reference/ (screenshotovi reference), CHANGELOG, uzorak projekta za "Try a sample" (sintetički skenirani crtež + skica), lista poznatih ograničenja i lista stavki koje su ostale neproverene u datom okruženju.

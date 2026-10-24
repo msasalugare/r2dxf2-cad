@@ -1,0 +1,193 @@
+/* Global layout & primitives for the M0 start screen. */
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+}
+
+body {
+  font-family: var(--font-family-sans);
+  font-size: var(--font-size-base);
+  line-height: var(--line-height-base);
+  color: var(--color-text-primary);
+  background: var(--color-surface-viewer);
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+#app {
+  position: relative;
+  height: 100dvh;
+}
+
+#viewer {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  background: var(--color-surface-viewer);
+}
+
+/* Visible, consistent focus. */
+:focus-visible {
+  outline: var(--focus-outline);
+  outline-offset: var(--focus-offset);
+}
+
+/* --- Start screen card ------------------------------------------------ */
+.start-card {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: min(360px, calc(100% - 32px));
+  padding: var(--space-32) var(--space-24);
+  background: var(--color-surface-panel);
+  border: var(--border-width) solid var(--color-divider);
+  border-radius: var(--radius-overlay);
+  box-shadow: var(--shadow-overlay);
+  text-align: center;
+  animation: fade-in var(--overlay-duration-enter) ease;
+}
+
+.title {
+  margin: 0;
+  font-size: var(--font-size-title);
+  font-weight: var(--font-weight-semibold);
+  line-height: var(--line-height-quantity);
+}
+
+.tagline {
+  margin: var(--space-8) 0 var(--space-24);
+  color: var(--color-text-secondary);
+}
+
+.actions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: var(--target-coarse);
+  padding: 0 var(--space-16);
+  font: inherit;
+  font-weight: var(--font-weight-medium);
+  color: var(--color-text-primary);
+  background: var(--color-surface-panel);
+  border: var(--border-width) solid var(--color-divider);
+  border-radius: var(--radius-control);
+  cursor: pointer;
+  transition: var(--transition-interactive);
+}
+
+.btn:hover {
+  background: var(--color-control-hover-surface);
+  border-color: var(--color-control-hover-border);
+}
+
+.btn:active {
+  background: var(--color-control-active-surface);
+  border-color: var(--color-control-active-border);
+}
+
+.btn-primary {
+  color: var(--color-accent-contrast);
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+}
+
+.btn-primary:hover {
+  background: var(--color-accent-hover);
+  border-color: var(--color-accent-hover);
+}
+
+.btn-primary:active {
+  background: var(--color-accent-active);
+  border-color: var(--color-accent-active);
+}
+
+.privacy {
+  margin: var(--space-16) 0 0;
+  font-size: var(--font-size-secondary);
+  line-height: var(--line-height-secondary);
+  color: var(--color-text-secondary);
+}
+
+/* --- Theme toggle ------------------------------------------------------ */
+.icon-btn {
+  position: absolute;
+  top: var(--space-16);
+  right: var(--space-16);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--target-coarse);
+  height: var(--target-coarse);
+  color: var(--color-text-secondary);
+  background: var(--color-surface-panel);
+  border: var(--border-width) solid var(--color-divider);
+  border-radius: var(--radius-control);
+  cursor: pointer;
+  box-shadow: var(--shadow-floating);
+  transition: var(--transition-interactive);
+}
+
+.icon-btn:hover {
+  color: var(--color-text-primary);
+  background: var(--color-control-hover-surface);
+}
+
+.icon-btn svg {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+}
+
+/* --- Status bar -------------------------------------------------------- */
+.status-bar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  height: 28px;
+  padding: 0 var(--space-16);
+  font-size: var(--font-size-secondary);
+  font-variant-numeric: var(--font-variant-numeric-tabular);
+  color: var(--color-text-secondary);
+  background: var(--color-surface-panel);
+  border-top: var(--border-width) solid var(--color-divider);
+  z-index: var(--z-status);
+}
+
+/* Drag-and-drop highlight. */
+body.is-dragging .start-card {
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 2px var(--color-accent), var(--shadow-overlay);
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .start-card {
+    animation: none;
+  }
+}

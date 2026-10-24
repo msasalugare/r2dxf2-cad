@@ -1,0 +1,26 @@
+[workspace]
+resolver = "2"
+members = ["crates/rf-core", "crates/rf-wasm"]
+# Native-only default: keeps `cargo build` / `cargo test` on the host from
+# touching the wasm-bindgen crate (which targets wasm32-unknown-unknown).
+default-members = ["crates/rf-core"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["RasterFit contributors"]
+repository = "https://github.com/userfypp/r2dxf"
+
+[workspace.dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+# Added when the solver/fitter milestones (M5/M6) need linear algebra.
+nalgebra = "0.35.0"
+# wasm-bindgen CLI must be pinned to exactly this version (see docker/Dockerfile).
+wasm-bindgen = "0.2.129"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

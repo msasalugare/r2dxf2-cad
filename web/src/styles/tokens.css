@@ -1,0 +1,156 @@
+/* RasterFit design tokens.
+ *
+ * Extracted in spirit from the Plan Measure reference (see docs/reference/),
+ * written as an original set — not a copy of any reference stylesheet.
+ * Tokens are grouped: color (light/dark), spacing, typography, shape,
+ * elevation, motion, focus, and z-index.
+ */
+
+:root,
+:root[data-theme='light'] {
+  /* Surfaces */
+  --color-surface-shell: #f7f8f9;
+  --color-surface-panel: #ffffff;
+  --color-surface-viewer: #eceef0;
+  --color-viewer-grid-dot: #d3d7dc;
+  --color-surface-raised: #ffffff;
+  --color-surface-field: #f3f5f7;
+  --color-divider: #e3e6e9;
+
+  /* Text */
+  --color-text-primary: #242a31;
+  --color-text-secondary: #626b76;
+  --color-text-disabled: #858d96;
+
+  /* Accent & status */
+  --color-accent: #2465c7;
+  --color-accent-hover: #1f59b2;
+  --color-accent-active: #194b99;
+  --color-accent-contrast: #ffffff;
+  --color-selection-surface: #eaf1fc;
+  --color-danger: #ac3540;
+  --color-focus: #185fc7;
+  --color-success: #067647;
+  --color-warning: #b54708;
+
+  /* Control states */
+  --color-control-hover-surface: #eef1f4;
+  --color-control-active-surface: #e1e6ec;
+  --color-control-hover-border: #c5cbd2;
+  --color-control-active-border: #98a2ae;
+
+  --shadow-overlay: 0 2px 10px rgba(24, 32, 42, 0.12);
+  --shadow-floating: 0 1px 4px rgba(24, 32, 42, 0.08);
+
+  color-scheme: light;
+}
+
+:root[data-theme='dark'] {
+  /* Surfaces */
+  --color-surface-shell: #25292e;
+  --color-surface-panel: #25292e;
+  --color-surface-viewer: #1b1e22;
+  --color-viewer-grid-dot: #2c3036;
+  --color-surface-raised: #30353c;
+  --color-surface-field: #30353b;
+  --color-divider: #3a4048;
+
+  /* Text */
+  --color-text-primary: #edf0f4;
+  --color-text-secondary: #adb5c0;
+  --color-text-disabled: #7c8591;
+
+  /* Accent & status */
+  --color-accent: #91b8f0;
+  --color-accent-hover: #a7c8f4;
+  --color-accent-active: #7fa9e4;
+  --color-accent-contrast: #1b1e22;
+  --color-selection-surface: #303f54;
+  --color-danger: #ee969e;
+  --color-focus: #aacaff;
+  --color-success: #6ce9a6;
+  --color-warning: #fec84b;
+
+  /* Control states */
+  --color-control-hover-surface: #343a42;
+  --color-control-active-surface: #3d4651;
+  --color-control-hover-border: #59636f;
+  --color-control-active-border: #748092;
+
+  --shadow-overlay: 0 3px 12px rgba(0, 0, 0, 0.25);
+  --shadow-floating: 0 1px 6px rgba(0, 0, 0, 0.18);
+
+  color-scheme: dark;
+}
+
+:root {
+  /* Spacing */
+  --space-4: 4px;
+  --space-8: 8px;
+  --space-12: 12px;
+  --space-16: 16px;
+  --space-24: 24px;
+  --space-32: 32px;
+  --space-40: 40px;
+  --space-48: 48px;
+
+  /* Typography */
+  --font-family-sans: Arial, 'Helvetica Neue', Helvetica, sans-serif;
+  --font-size-micro: 10px;
+  --font-size-secondary: 12px;
+  --font-size-base: 13px;
+  --font-size-heading: 14px;
+  --font-size-identity: 16px;
+  --font-size-quantity: 20px;
+  --font-size-title: 22px;
+  --line-height-micro: 12px;
+  --line-height-secondary: 16px;
+  --line-height-base: 18px;
+  --line-height-heading: 20px;
+  --line-height-identity: 22px;
+  --line-height-quantity: 24px;
+  --font-weight-regular: 400;
+  --font-weight-medium: 500;
+  --font-weight-semibold: 600;
+  --font-variant-numeric-tabular: tabular-nums;
+
+  /* Shape & elevation */
+  --radius-surface: 0;
+  --radius-control: 4px;
+  --radius-overlay: 6px;
+  --radius-pill: 999px;
+  --border-width: 1px;
+
+  /* Motion */
+  --transition-interactive: background-color 120ms ease, border-color 120ms ease,
+    color 120ms ease, box-shadow 120ms ease;
+  --transition-transform: transform 120ms ease;
+  --overlay-duration-enter: 120ms;
+  --loading-reveal-delay: 500ms;
+
+  /* Focus */
+  --focus-width: 2px;
+  --focus-offset: 2px;
+  --focus-outline: var(--focus-width) solid var(--color-focus);
+
+  /* Target sizes */
+  --target-fine: 32px;
+  --target-coarse: 44px;
+
+  /* z-index scale */
+  --z-base: 0;
+  --z-raised: 1;
+  --z-panel: 5;
+  --z-overlay: 10;
+  --z-status: 20;
+  --z-popover: 250;
+  --z-tooltip: 300;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --transition-interactive: none;
+    --transition-transform: none;
+    --overlay-duration-enter: 0ms;
+  }
+}

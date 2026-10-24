@@ -1,0 +1,23 @@
+services:
+  rasterfit:
+    build:
+      context: .
+    image: rasterfit:latest
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /var/cache/nginx
+      - /run
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    # No volumes, no backend: data stays in the browser.

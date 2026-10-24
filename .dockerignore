@@ -1,0 +1,21 @@
+# Git
+.git
+.gitignore
+
+# Rust
+target/
+crates/*/target/
+
+# Node
+node_modules
+web/node_modules
+web/dist
+web/test-results
+web/playwright-report
+
+# Docs (large reference screenshots)
+docs/reference
+
+# CI / misc
+.github
+.env

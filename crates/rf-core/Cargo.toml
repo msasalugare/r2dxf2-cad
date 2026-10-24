@@ -1,0 +1,9 @@
+[package]
+name = "rf-core"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Pure-Rust core for RasterFit: geometry, calibration, ridge, mask, constraints, solver, fitter, export, project."
+
+[dependencies]
+serde = { workspace = true }
