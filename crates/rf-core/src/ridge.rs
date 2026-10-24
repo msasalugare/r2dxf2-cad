@@ -13,9 +13,10 @@
 //! WASM bridge are added once the ridge is consumed by the browser.
 
 use crate::geometry::normalize_angle;
+use serde::{Deserialize, Serialize};
 
 /// Ridge detection parameters.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RidgeParams {
     /// Smoothing scales in pixels for the multi-scale ridge response.
     pub scales: Vec<f64>,
@@ -37,7 +38,7 @@ impl Default for RidgeParams {
 
 /// A detected ridge point in raster coordinates (pixels, y-down, pixel centres
 /// at `(i + 0.5, j + 0.5)`).
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct RidgePoint {
     pub x: f64,
     pub y: f64,

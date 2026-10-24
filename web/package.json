@@ -11,7 +11,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "tsc --noEmit",
-    "e2e": "playwright test"
+    "e2e": "playwright test",
+    "wasm:build": "bash scripts/build-wasm.sh"
   },
   "devDependencies": {
     "@playwright/test": "1.64.1",

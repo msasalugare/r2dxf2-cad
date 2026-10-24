@@ -1,10 +1,26 @@
 # syntax=docker/dockerfile:1
-# RasterFit — M0 build.
-#
-# The full pipeline (Rust wasm32 stage with pinned wasm-bindgen CLI + wasm-opt,
-# and a `test` stage running cargo/clippy/vitest) is added in M1/M3 once the
-# web app actually links the WASM core. Until then the container only needs the
-# static web build.
+# RasterFit build.
+
+# ---- wasm build (Rust core → wasm-bindgen package) -----------------------
+FROM rust:1.94.0 AS wasm
+WORKDIR /app
+
+RUN rustup target add wasm32-unknown-unknown
+
+# Build the wasm crate (registry/target cache mounts can be added for BuildKit).
+COPY Cargo.toml Cargo.lock ./
+COPY crates/ ./crates/
+RUN cargo build --release --target wasm32-unknown-unknown -p rf-wasm --locked
+
+# wasm-bindgen CLI must match the Cargo.lock version exactly (D6).
+RUN set -eux; \
+    LOCKED=$(awk '/^name = "wasm-bindgen"$/{getline; if ($0 ~ /version = /) {gsub(/"/,"",$3); print $3; exit}}' Cargo.lock); \
+    echo "wasm-bindgen locked: $LOCKED"; \
+    cargo install wasm-bindgen-cli --version "$LOCKED"; \
+    INSTALLED=$(wasm-bindgen --version | awk '{print $2}'); \
+    [ "$INSTALLED" = "$LOCKED" ] || { echo "wasm-bindgen CLI mismatch: $INSTALLED != $LOCKED"; exit 1; }
+
+RUN wasm-bindgen target/wasm32-unknown-unknown/release/rf_wasm.wasm --out-dir wasm-pkg --target web
 
 # ---- web build ------------------------------------------------------------
 FROM node:24-alpine AS web
@@ -13,6 +29,7 @@ WORKDIR /app
 COPY web/package.json web/package-lock.json ./
 RUN npm ci
 
+COPY --from=wasm /app/wasm-pkg ./public/wasm/
 COPY web/ ./
 ARG VITE_BASE=/
 ENV VITE_BASE=${VITE_BASE}

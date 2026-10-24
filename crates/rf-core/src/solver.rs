@@ -8,6 +8,7 @@
 use std::ops::{Add, Div, Mul, Neg, Sub};
 
 use nalgebra::{DMatrix, DVector};
+use serde::{Deserialize, Serialize};
 
 use crate::sketch::{Constraint, Sketch};
 
@@ -154,7 +155,7 @@ pub(crate) fn atan2(y: Dual, x: Dual) -> Dual {
 }
 
 /// Result of a solve, including diagnostics.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SolveResult {
     pub params: Vec<f64>,
     pub residuals: Vec<f64>,

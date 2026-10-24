@@ -7,13 +7,14 @@
 //! constraints). See `docs/ALGORITHM.md` §10 and acceptance tests T3/T5.
 
 use nalgebra::{DMatrix, DVector};
+use serde::{Deserialize, Serialize};
 
 use crate::ridge::RidgePoint;
 use crate::sketch::{CircleId, Constraint, PointId, Sketch};
 use crate::solver::{residual_vec, Dual};
 
 /// Fitter options.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct FitterParams {
     pub max_iterations: usize,
     /// Maximum distance (px) for a sketch sample to consider a centerline.
@@ -39,7 +40,7 @@ impl Default for FitterParams {
 }
 
 /// Fitter result.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FitterResult {
     /// Solved geometry parameters (flattened sketch parameters).
     pub params: Vec<f64>,

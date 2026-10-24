@@ -51,15 +51,12 @@ verified as such.
 ### Rust status and gaps
 
 - ✅ Toolchain present and working.
-- ❌ **`wasm32-unknown-unknown` target is NOT installed.** Required for the WASM
-  build (`crates/rf-wasm`). Installable via `rustup target add wasm32-unknown-unknown`
-  (network to `static.rust-lang.org` is reachable, see below).
-- ❌ **`wasm-bindgen` CLI is NOT installed** (`wasm-bindgen: command not found`).
-  Required later; must be installed pinned to the same version as the
-  `wasm-bindgen` crate in `Cargo.lock`.
+- ✅ **`wasm32-unknown-unknown` target is installed** (added for the WASM bridge;
+  `rustup target add wasm32-unknown-unknown`).
+- ✅ **`wasm-bindgen` CLI 0.2.129 is installed** (matches `Cargo.lock`).
 - ❌ **`wasm-opt` (binaryen) is NOT installed** (`wasm-opt: command not found`).
-  Required by the Docker `wasm` stage (`wasm-opt -O3`); can come from the binaryen
-  package/npm package or an apt install.
+  Optional: the local wasm build works without it; it is only used by the
+  optional `wasm-opt -O3` optimization step.
 
 ## Node / npm
 
@@ -98,9 +95,9 @@ All checks are HTTP status of a real request (curl), 15–20 s timeout.
 | Docker **buildx** | ❌ missing → D6 unverifiable here |
 | Docker Compose **v2** | ❌ missing (only `docker-compose` 1.29.2) → D1 exercised via `docker build`/`run` |
 | Rust toolchain | ✅ OK (1.94.0) |
-| `wasm32-unknown-unknown` target | ❌ not installed |
-| `wasm-bindgen` CLI | ❌ not installed |
-| `wasm-opt` (binaryen) | ❌ not installed |
+| `wasm32-unknown-unknown` target | ✅ installed (added for WASM bridge) |
+| `wasm-bindgen` CLI | ✅ 0.2.129 (matches Cargo.lock) |
+| `wasm-opt` (binaryen) | ❌ not installed (optional optimization) |
 | Node / npm | ⚠️ host 22.23.2 (spec wants 24 LTS in image) |
 | crates.io / index / static.crates.io | ✅ reachable |
 | static.rust-lang.org | ✅ reachable |
@@ -115,7 +112,9 @@ All checks are HTTP status of a real request (curl), 15–20 s timeout.
    host, so the verbatim command is not runnable here. The equivalent
    `docker build` + `docker run` path was verified instead; `docker compose` v2 is
    available on CI (ubuntu-latest) and in any standard install.
-3. **WASM build path** — unverified until `wasm32-unknown-unknown`, `wasm-bindgen` CLI
-   and `wasm-opt` are installed.
+3. **WASM build path** — ✅ verified: the target, wasm-bindgen CLI, the wasm crate,
+   the browser loader, and the e2e smoke (`data-wasm="loaded"`) all work locally.
+   `wasm-opt -O3` (binaryen) is still not installed here, so the optional
+   optimization step is not exercised on the host.
 4. **Node 24 LTS** — not exercised on the host; will be pinned and exercised inside the
    Docker `web` stage.

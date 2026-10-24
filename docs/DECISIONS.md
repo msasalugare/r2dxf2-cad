@@ -167,6 +167,21 @@ resolved from the live registries on 2026-10-24.
   JSON/CSV fit-report, zip project save/open (fflate), accessibility (axe), and
   the final Docker D1–D7 verification.
 
+## WASM bridge
+
+- **Boundary**: all values cross as JSON strings (or `Uint8Array` for gray
+  buffers), so `rf-core` stays the single source of truth for the numerics and
+  no `serde_wasm_bindgen` glue is needed. Bindings: `core_version`,
+  `solve_constraints`, `export_dxf`/`export_svg`, `detect_ridges`, `fit_sketch`.
+- **Packaging**: `web/scripts/build-wasm.sh` (`npm run wasm:build`) builds the
+  wasm crate and runs `wasm-bindgen --target web` into `web/public/wasm/`
+  (gitignored), so Vite serves it verbatim and nginx ships it under CSP
+  (`script-src 'wasm-unsafe-eval'`). The app lazy-loads it in `web/src/wasm.ts`
+  and sets `data-wasm` for the e2e smoke.
+- **Docker**: the `wasm` stage builds the crate and pins the wasm-bindgen CLI to
+  the `Cargo.lock` version (fail on mismatch, D6); the `web` stage copies the
+  package before `vite build`.
+
 ## Docker
 
 - **`node:24-alpine`** (web stage) — matches the pinned Node 24 LTS.
