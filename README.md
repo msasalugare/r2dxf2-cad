@@ -6,12 +6,12 @@ constraints) to a calibrated raster drawing, with an optional mask.
 Everything runs locally in the browser. No accounts, no uploads, no analytics,
 no telemetry. The container serves a static build only — there is no backend.
 
-> **Status**: WASM bridge landed. PNG/JPEG/WebP + PDF import, tiled pyramid
-> pan/zoom viewer, multi-page PDF navigation, IndexedDB autosave, calibration,
-> the `rf-core` ridge/mask/sketch/solver/fitter cores, DXF/SVG export, and a
-> working Rust→WASM bridge (loaded by the browser) are in place. Remaining:
-> interactive sketch/mask/fit UI, JSON/CSV report, zip project, and final
-> Docker/accessibility polish.
+> **Status**: WASM bridge + first wired tools landed. PNG/JPEG/WebP + PDF import,
+> tiled pyramid pan/zoom viewer, multi-page PDF navigation, IndexedDB autosave,
+> calibration, the `rf-core` ridge/mask/sketch/solver/fitter cores, DXF/SVG
+> export, a Rust→WASM bridge, and a sketch tool that solves constraints via WASM
+> are in place. Remaining: mask overlay + fit UI, JSON/CSV report, zip project,
+> and final Docker/accessibility polish.
 
 ## Quick start (Docker)
 
@@ -57,10 +57,9 @@ npm run dev
 
 ## Limitations (known)
 
-- The Rust core is reachable from the browser via the WASM bridge (e2e-verified),
-  but the interactive sketch editor, mask overlay, and fit UI are not yet wired
-  to it; JSON/CSV report, zip project save/open, accessibility, and the final
-  Docker D1–D7 checks remain.
+- The sketch tool uses the Rust solver via WASM; the mask overlay and fit UI are
+  not yet wired to the cores. JSON/CSV report, zip project save/open,
+  accessibility, and the final Docker D1–D7 checks remain.
 - PDF pages render at up to 600 DPI within a single-canvas size cap (per-tile
   native-resolution extraction is deferred); vector-only PDFs render as raster
   without a dedicated warning yet.

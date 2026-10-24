@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `detect_ridges`, `fit_sketch`) over a JSON boundary; a `wasm:build` script,
   browser loader, Docker `wasm` stage (with a wasm-bindgen CLI version check),
   and an e2e smoke test that the core loads in the browser.
+- **Sketch tool** wired to the WASM solver: click to draw segments, then Solve
+  snaps them to constraints (horizontal + driving distance) via
+  `solve_constraints`, with an e2e test.
 
 - **M7** export core (`rf-core::dxf`, `rf-core::svg`): ASCII DXF export of
   `LINE`/`CIRCLE` on `geometry`/`construction` layers (mm) with a round-trip

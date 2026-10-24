@@ -57,6 +57,13 @@ const sr = {
   'calibrate.warning.short-segment': 'Segment je prekratak',
   'calibrate.level.hint': 'Kliknite dve tačke na liniji za nivelisanje',
   'calibrate.error.invalid-length': 'Neispravna dužina',
+  'toolbar.sketch': 'Skica',
+  'sketch.title': 'Skica',
+  'sketch.hint': 'Kliknite tačke da nacrtate skicu',
+  'sketch.solve': 'Reši',
+  'sketch.clear': 'Obriši',
+  'sketch.result': 'Rešeno — max rezidual {r}',
+  'sketch.none': 'Nacrtajte skicu pa kliknite „Reši“',
 } as const;
 
 const en: Record<keyof typeof sr, string> = {
@@ -114,6 +121,13 @@ const en: Record<keyof typeof sr, string> = {
   'calibrate.warning.short-segment': 'Segment is too short',
   'calibrate.level.hint': 'Click two points on a line to level it',
   'calibrate.error.invalid-length': 'Invalid length',
+  'toolbar.sketch': 'Sketch',
+  'sketch.title': 'Sketch',
+  'sketch.hint': 'Click points to draw a sketch',
+  'sketch.solve': 'Solve',
+  'sketch.clear': 'Clear',
+  'sketch.result': 'Solved — max residual {r}',
+  'sketch.none': 'Draw a sketch then click Solve',
 };
 
 const messages: Record<Locale, Record<keyof typeof sr, string>> = { sr, en };
