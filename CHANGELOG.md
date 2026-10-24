@@ -22,6 +22,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   shows the RMS/rotation result, with an e2e test.
 - **Mask overlay UI**: a brush tool with include/exclude modes and a
   semi-transparent overlay, with an e2e test.
+- **Mask into fitter**: `rf-core::fitter::fit_masked` resolves the weight map
+  and filters centerlines below 0.5 weight; the sketch Fit uses the active mask
+  strokes via a `fit_sketch_masked` WASM binding (native distractor test + e2e).
 
 - **M7** export core (`rf-core::dxf`, `rf-core::svg`): ASCII DXF export of
   `LINE`/`CIRCLE` on `geometry`/`construction` layers (mm) with a round-trip

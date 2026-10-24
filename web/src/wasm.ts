@@ -8,6 +8,16 @@ export interface WasmModule {
   export_svg(sketch_json: string): string;
   detect_ridges(gray: Uint8Array, width: number, height: number, params_json: string): string;
   fit_sketch(sketch_json: string, centerlines_json: string, initial_json: string, params_json: string): string;
+  fit_sketch_masked(
+    sketch_json: string,
+    centerlines_json: string,
+    mask_strokes_json: string,
+    mask_params_json: string,
+    raster_width: number,
+    raster_height: number,
+    initial_json: string,
+    params_json: string,
+  ): string;
 }
 
 let ready: Promise<WasmModule> | null = null;
@@ -24,6 +34,7 @@ export function loadWasm(): Promise<WasmModule> {
         export_svg: (s: string) => string;
         detect_ridges: (g: Uint8Array, w: number, h: number, p: string) => string;
         fit_sketch: (s: string, c: string, i: string, p: string) => string;
+        fit_sketch_masked: (s: string, c: string, m: string, mp: string, w: number, h: number, i: string, p: string) => string;
       };
       await mod.default();
       return mod as unknown as WasmModule;

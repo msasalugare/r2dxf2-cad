@@ -30,6 +30,7 @@ export class SketchController {
     private locale: Locale,
     private onStatus: (msg: string, isError?: boolean) => void,
     private getGray: () => Promise<{ data: Uint8Array; width: number; height: number } | null>,
+    private getMaskStrokes: () => { mode: 'include' | 'exclude'; points: { x: number; y: number }[] }[],
   ) {}
 
   isActive(): boolean {
@@ -153,14 +154,37 @@ export class SketchController {
         tikhonov: 1e-6,
         constraint_penalty: 1e-3,
       };
-      const result = JSON.parse(
-        wasm.fit_sketch(
-          JSON.stringify(this.buildSketch()),
+
+      const sketchJson = JSON.stringify(this.buildSketch());
+      const maskStrokes = this.getMaskStrokes();
+      let resultJson: string;
+      if (maskStrokes.length > 0) {
+        const rfStrokes = maskStrokes.map((s) => ({
+          mode: s.mode === 'include' ? 'Include' : 'Exclude',
+          kind: 'Brush',
+          radius: 6.0,
+          points: s.points,
+        }));
+        const maskParams = {
+          enabled: true,
+          base_all: !maskStrokes.some((s) => s.mode === 'include'),
+          feather: 3.0,
+        };
+        resultJson = wasm.fit_sketch_masked(
+          sketchJson,
           JSON.stringify(ridges),
+          JSON.stringify(rfStrokes),
+          JSON.stringify(maskParams),
+          gray.width,
+          gray.height,
           JSON.stringify([0, 0, 0]),
           JSON.stringify(fitterParams),
-        ),
-      ) as { params: number[]; rms_px: number; transform: [number, number, number] };
+        );
+      } else {
+        resultJson = wasm.fit_sketch(sketchJson, JSON.stringify(ridges), JSON.stringify([0, 0, 0]), JSON.stringify(fitterParams));
+      }
+
+      const result = JSON.parse(resultJson) as { params: number[]; rms_px: number; transform: [number, number, number] };
 
       for (let i = 0; i < this.points.length; i += 1) {
         this.points[i].x = result.params[2 * i];

@@ -9,6 +9,7 @@
 use nalgebra::{DMatrix, DVector};
 use serde::{Deserialize, Serialize};
 
+use crate::mask::{resolve_mask, MaskParams, MaskStroke};
 use crate::ridge::RidgePoint;
 use crate::sketch::{CircleId, Constraint, PointId, Sketch};
 use crate::solver::{residual_vec, Dual};
@@ -218,6 +219,37 @@ pub fn fit(
         converged,
         gauge_warning: !has_orientation_anchor(sketch),
     }
+}
+
+/// Fit a sketch to centerlines, first masking centerlines whose resolved
+/// weight is below 0.5.
+#[allow(clippy::too_many_arguments)]
+pub fn fit_masked(
+    sketch: &Sketch,
+    centerlines: &[RidgePoint],
+    mask_strokes: &[MaskStroke],
+    mask_params: &MaskParams,
+    raster_width: usize,
+    raster_height: usize,
+    initial: &[f64; 3],
+    params: &FitterParams,
+) -> FitterResult {
+    let weights = resolve_mask(mask_strokes, mask_params, raster_width, raster_height);
+    let filtered: Vec<RidgePoint> = centerlines
+        .iter()
+        .filter(|c| mask_weight(&weights, raster_width, raster_height, c.x, c.y) >= 0.5)
+        .copied()
+        .collect();
+    fit(sketch, &filtered, initial, params)
+}
+
+fn mask_weight(weights: &[f64], width: usize, height: usize, x: f64, y: f64) -> f64 {
+    let xi = x.round() as isize;
+    let yi = y.round() as isize;
+    if xi < 0 || yi < 0 || xi >= width as isize || yi >= height as isize {
+        return 0.0;
+    }
+    weights[yi as usize * width + xi as usize]
 }
 
 /// Build the deterministic sample set from the sketch geometry.
@@ -456,6 +488,7 @@ fn has_orientation_anchor(sketch: &Sketch) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mask::{MaskParams, MaskStroke, StrokeKind, StrokeMode};
     use crate::sketch::{CircleId, LineId, PointId, SketchCircle, SketchLine, SketchPoint};
 
     fn p(id: u32, x: f64, y: f64) -> SketchPoint {
@@ -610,5 +643,67 @@ mod tests {
         };
         let samples = build_samples(&sketch, 2.0);
         assert!(samples.len() >= 8);
+    }
+
+    #[test]
+    fn masked_fit_ignores_distractor() {
+        // Two vertical lines 3 px apart: main at x=100, distractor at x=103.
+        let mut centerlines = Vec::new();
+        for y in (0..=50).step_by(2) {
+            let y = y as f64;
+            centerlines.push(RidgePoint {
+                x: 100.0,
+                y,
+                direction: std::f64::consts::FRAC_PI_2,
+                strength: 1.0,
+                scale: 1.0,
+            });
+            centerlines.push(RidgePoint {
+                x: 103.0,
+                y,
+                direction: std::f64::consts::FRAC_PI_2,
+                strength: 1.0,
+                scale: 1.0,
+            });
+        }
+
+        // A vertical sketch line near the main line.
+        let sketch = Sketch {
+            points: vec![p(1, 99.0, 0.0), p(2, 99.0, 50.0)],
+            lines: vec![line(1, 1, 2)],
+            circles: vec![],
+            constraints: vec![Constraint::Vertical(LineId::new(1))],
+        };
+
+        // Include mask over the main line only.
+        let mask = vec![MaskStroke {
+            mode: StrokeMode::Include,
+            kind: StrokeKind::Brush,
+            radius: 2.0,
+            points: vec![
+                crate::geometry::Point::new(100.0, 0.0),
+                crate::geometry::Point::new(100.0, 50.0),
+            ],
+        }];
+        let mask_params = MaskParams {
+            enabled: true,
+            base_all: false,
+            feather: 1.0,
+        };
+
+        let result = fit_masked(
+            &sketch,
+            &centerlines,
+            &mask,
+            &mask_params,
+            200,
+            60,
+            &[0.0, 0.0, 0.0],
+            &FitterParams::default(),
+        );
+        assert!(result.converged, "not converged, rms {}", result.rms_px);
+        // The fitted line x should be at the main line (100), not pulled to 103.
+        let x = result.params[0];
+        assert!((x - 100.0).abs() < 0.5, "fitted x drifted to {x}");
     }
 }

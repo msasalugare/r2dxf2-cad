@@ -59,16 +59,23 @@ export function initApp(): () => void {
     () => (activePage ? { width: activePage.meta.width, height: activePage.meta.height } : null),
   );
 
-  const sketch = new SketchController(viewer, sketchPanel, locale, setStatus, async () => {
-    if (!activePage) return null;
-    try {
-      return await importer.getGray(activePage.meta.pageIndex);
-    } catch {
-      return null;
-    }
-  });
-
   const mask = new MaskController(viewer, maskPanel, locale, setStatus);
+
+  const sketch = new SketchController(
+    viewer,
+    sketchPanel,
+    locale,
+    setStatus,
+    async () => {
+      if (!activePage) return null;
+      try {
+        return await importer.getGray(activePage.meta.pageIndex);
+      } catch {
+        return null;
+      }
+    },
+    () => mask.getStrokes(),
+  );
 
   const refreshZoom = (): void => {
     zoom.textContent = tf(locale, 'status.zoom', {
@@ -240,7 +247,11 @@ export function initApp(): () => void {
       return;
     }
     if (calibration.isActive()) calibration.deactivate();
-    else calibration.activate();
+    else {
+      sketch.deactivate();
+      mask.deactivate();
+      calibration.activate();
+    }
   });
   document.querySelector('#sketch-btn')!.addEventListener('click', () => {
     if (!activePage) {
@@ -248,7 +259,11 @@ export function initApp(): () => void {
       return;
     }
     if (sketch.isActive()) sketch.deactivate();
-    else sketch.activate();
+    else {
+      calibration.deactivate();
+      mask.deactivate();
+      sketch.activate();
+    }
   });
   document.querySelector('#mask-btn')!.addEventListener('click', () => {
     if (!activePage) {
@@ -256,7 +271,11 @@ export function initApp(): () => void {
       return;
     }
     if (mask.isActive()) mask.deactivate();
-    else mask.activate();
+    else {
+      calibration.deactivate();
+      sketch.deactivate();
+      mask.activate();
+    }
   });
   document.querySelector('#prev-btn')!.addEventListener('click', () => void showPage(pageIndex - 1));
   document.querySelector('#next-btn')!.addEventListener('click', () => void showPage(pageIndex + 1));

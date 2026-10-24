@@ -57,9 +57,9 @@ npm run dev
 
 ## Limitations (known)
 
-- The mask overlay UI is wired; the mask is not yet fed into the fitter (weight
-  map via `rf-core::mask`), and JSON/CSV report, zip project save/open,
-  accessibility, and the final Docker D1–D7 checks remain.
+- The mask now feeds the fitter (`fit_masked` filters centerlines by weight).
+  JSON/CSV report, zip project save/open, accessibility, and the final Docker
+  D1–D7 checks remain.
 - PDF pages render at up to 600 DPI within a single-canvas size cap (per-tile
   native-resolution extraction is deferred); vector-only PDFs render as raster
   without a dedicated warning yet.

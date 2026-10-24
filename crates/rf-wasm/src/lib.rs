@@ -6,7 +6,8 @@
 
 use wasm_bindgen::prelude::*;
 
-use rf_core::fitter::{fit, FitterParams};
+use rf_core::fitter::{fit, fit_masked, FitterParams};
+use rf_core::mask::{MaskParams, MaskStroke};
 use rf_core::ridge::{detect_ridges as ridge_detect, RidgeParams};
 use rf_core::sketch::Sketch;
 use rf_core::solver::solve;
@@ -71,4 +72,35 @@ pub fn fit_sketch(
     let initial: [f64; 3] = parse(initial_json)?;
     let params: FitterParams = parse(params_json)?;
     serde_json::to_string(&fit(&sketch, &centerlines, &initial, &params)).map_err(err)
+}
+
+/// Fit a constrained sketch to masked centerlines; returns JSON `FitterResult`.
+#[wasm_bindgen]
+pub fn fit_sketch_masked(
+    sketch_json: &str,
+    centerlines_json: &str,
+    mask_strokes_json: &str,
+    mask_params_json: &str,
+    raster_width: usize,
+    raster_height: usize,
+    initial_json: &str,
+    params_json: &str,
+) -> Result<String, JsValue> {
+    let sketch: Sketch = parse(sketch_json)?;
+    let centerlines: Vec<rf_core::ridge::RidgePoint> = parse(centerlines_json)?;
+    let mask_strokes: Vec<MaskStroke> = parse(mask_strokes_json)?;
+    let mask_params: MaskParams = parse(mask_params_json)?;
+    let initial: [f64; 3] = parse(initial_json)?;
+    let params: FitterParams = parse(params_json)?;
+    let result = fit_masked(
+        &sketch,
+        &centerlines,
+        &mask_strokes,
+        &mask_params,
+        raster_width,
+        raster_height,
+        &initial,
+        &params,
+    );
+    serde_json::to_string(&result).map_err(err)
 }
