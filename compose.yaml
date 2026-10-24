@@ -2,6 +2,7 @@ services:
   rasterfit:
     build:
       context: .
+      dockerfile: docker/Dockerfile
     image: rasterfit:latest
     ports:
       - "8080:8080"

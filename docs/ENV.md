@@ -24,6 +24,9 @@ verified as such.
 - `docker buildx version`: **`unknown command: docker buildx`**.
   - No buildx plugin under `/usr/libexec/docker/cli-plugins/` (only `docker-trust`),
     no `~/.docker/cli-plugins/`, no `docker-buildx` on PATH.
+- `docker compose version`: **`unknown command: docker compose`** (Compose v2 plugin
+  missing). The standalone **`docker-compose` 1.29.2** (v1) is present instead.
+  - No compose plugin under `/usr/libexec/docker/cli-plugins/`.
 
 ### Docker status and gaps
 
@@ -32,6 +35,10 @@ verified as such.
   - Multi-architecture image builds (`linux/amd64` + `linux/arm64`, criterion **D6**)
     cannot be produced or verified in this environment.
   - Single-architecture `docker build` (native `linux/amd64`) is still available.
+- ❌ **Docker Compose v2 (`docker compose`) is NOT installed**; only the legacy
+  standalone `docker-compose` 1.29.2 is present. `docker compose up --build` (D1)
+  cannot be exercised verbatim on this host — verified instead via
+  `docker build` + `docker run` with the same runtime flags.
 - ⚠️ **D6 is UNVERIFIABLE here** until buildx is installed. Not faked; marked open.
 
 ## Rust
@@ -89,6 +96,7 @@ All checks are HTTP status of a real request (curl), 15–20 s timeout.
 | --- | --- |
 | Docker engine + daemon | ✅ OK (29.1.3) |
 | Docker **buildx** | ❌ missing → D6 unverifiable here |
+| Docker Compose **v2** | ❌ missing (only `docker-compose` 1.29.2) → D1 exercised via `docker build`/`run` |
 | Rust toolchain | ✅ OK (1.94.0) |
 | `wasm32-unknown-unknown` target | ❌ not installed |
 | `wasm-bindgen` CLI | ❌ not installed |
@@ -103,7 +111,11 @@ All checks are HTTP status of a real request (curl), 15–20 s timeout.
 
 1. **D6 (multi-arch build)** — blocked by missing buildx. Needs `docker buildx` plugin
    (e.g. the `docker-buildx-plugin` package) plus `qemu`/binfmt for arm64.
-2. **WASM build path** — unverified until `wasm32-unknown-unknown`, `wasm-bindgen` CLI
+2. **D1 (`docker compose up --build`)** — the Compose v2 plugin is missing on the dev
+   host, so the verbatim command is not runnable here. The equivalent
+   `docker build` + `docker run` path was verified instead; `docker compose` v2 is
+   available on CI (ubuntu-latest) and in any standard install.
+3. **WASM build path** — unverified until `wasm32-unknown-unknown`, `wasm-bindgen` CLI
    and `wasm-opt` are installed.
-3. **Node 24 LTS** — not exercised on the host; will be pinned and exercised inside the
+4. **Node 24 LTS** — not exercised on the host; will be pinned and exercised inside the
    Docker `web` stage.
