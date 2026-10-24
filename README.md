@@ -6,10 +6,11 @@ constraints) to a calibrated raster drawing, with an optional mask.
 Everything runs locally in the browser. No accounts, no uploads, no analytics,
 no telemetry. The container serves a static build only — there is no backend.
 
-> **Status**: M4 (mask core) landed. PNG/JPEG/WebP + PDF import, tiled pyramid
-> pan/zoom viewer, multi-page PDF navigation, IndexedDB autosave, calibration,
-> the `rf-core::ridge` centerline detector, and the `rf-core::mask` weight-map
-> resolver are in place. Sketch/fitter arrive in M5–M6.
+> **Status**: M5 (sketch + solver core) landed. PNG/JPEG/WebP + PDF import, tiled
+> pyramid pan/zoom viewer, multi-page PDF navigation, IndexedDB autosave,
+> calibration, the `rf-core::ridge` centerline detector, the `rf-core::mask`
+> weight-map resolver, and the `rf-core::sketch`/`solver` constraint engine are
+> in place. Fitter arrives in M6.
 
 ## Quick start (Docker)
 
@@ -55,12 +56,11 @@ npm run dev
 
 ## Limitations (known)
 
-- M4: no sketch/fitting yet — see the milestone list in `docs/` and
-  `CHANGELOG.md`. The ridge and mask cores live in `rf-core` (natively tested)
-  but are not yet wired into the browser: the sub-pixel calibration snap and the
-  mask brush/overlay tools need the WASM bridge (still deferred, see
-  `docs/ENV.md`) plus the interactive overlay UI. Fitter-only mask acceptance
-  (T9/T10) arrives with M6.
+- M5: no fitting yet — see the milestone list in `docs/` and `CHANGELOG.md`.
+  The ridge/mask/sketch/solver cores live in `rf-core` (natively tested) but are
+  not yet wired into the browser: the interactive sketch editor (draw/drag/undo,
+  constraint panel) and mask overlay tools need the WASM bridge (still deferred,
+  see `docs/ENV.md`) plus the UI layer. Fitter + full workflow arrive in M6.
 - PDF pages render at up to 600 DPI within a single-canvas size cap (per-tile
   native-resolution extraction is deferred); vector-only PDFs render as raster
   without a dedicated warning yet.

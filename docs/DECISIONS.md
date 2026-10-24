@@ -24,8 +24,8 @@ resolved from the live registries on 2026-10-24.
 - **Dependencies** (workspace, added lazily):
   - `serde 1.0.229` (derive) — project/report serialization. MIT/Apache-2.0.
   - `serde_json 1.0.154` — JSON export/project. MIT/Apache-2.0.
-  - `nalgebra 0.35.0` — linear algebra for the solver/fitter (M5/M6). Deferred:
-    not a dependency of `rf-core` yet, to keep the M0 build lean.
+  - `nalgebra 0.35.0` — linear algebra for the solver/fitter (M5/M6). Added to
+    `rf-core` in M5 for the constraint solver's Cholesky solve and SVD rank.
   - `wasm-bindgen 0.2.129` — wasm layer. CLI must match this exact version.
 
 ## Web stack
@@ -120,6 +120,24 @@ resolved from the live registries on 2026-10-24.
 - **Deferred**: the interactive brush/polygon/rect/eraser tools, the bitmap
   cache (1/1…1/4 resolution, tiled/lazy), and the overlay are browser UI tied to
   the WASM bridge; the fitter-only mask acceptance (T9/T10) lands in M6.
+
+## M5 sketch & solver decisions
+
+- **Parameterization**: points carry `(x, y)` and circles a `radius` as the
+  solver's scalar unknowns; lines are two points. The flattened parameter vector
+  is `2·points + circles`. Arcs (angle parameters) are deferred to M6.
+- **Jacobian**: exact via forward-mode dual-number autodiff over the parameter
+  vector, so no hand-derived analytic derivatives; validated against central
+  finite differences (< 1e-6 relative, T13).
+- **Solve**: Gauss–Newton with a Levenberg damping that tightens on accepted
+  steps and grows on rejection, targeting `max residual < 1e-12`; `nalgebra`
+  provides the `(JᵀJ + μI)` Cholesky solve and the SVD for rank.
+- **Diagnostics**: rank/DoF from the Jacobian's singular values (tolerance
+  1e-9); a constraint is redundant when removing its rows leaves the rank
+  unchanged, and conflicting when its residual is not driven below 1e-6.
+- **Deferred**: the interactive editor (Select/Point/Line/Circle/Arc tools,
+  auto-constraints, drag-to-solve, undo/redo, constraint panel) is browser UI
+  tied to the WASM bridge.
 
 ## Docker
 

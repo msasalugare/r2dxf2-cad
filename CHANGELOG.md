@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **M5** sketch + solver core (`rf-core::sketch`, `rf-core::solver`): parametric
+  points/lines/circles with stable IDs, 14 constraint types (Coincident,
+  Horizontal/Vertical, Parallel/Perpendicular, EqualLength/EqualRadius, Tangent,
+  Distance, Angle, Radius, Fixed, PointOnLine/PointOnCircle), a Gauss–Newton/LM
+  solver with an exact Jacobian from dual-number autodiff, and rank/DoF +
+  redundant/conflicting analysis. Native T13 tests: autodiff Jacobian vs finite
+  differences < 1e-6 for every type, known DoF cases, redundant/conflicting
+  detection, and drag invariance (‖c‖∞ < 1e-9 mm). `nalgebra` added for the
+  linear algebra.
+
 - **M4** mask core (`rf-core::mask`): vector strokes (brush / polygon / rect,
   include / exclude) resolved to a per-pixel weight map in raster coordinates,
   with antialiased linear-feather coverage and the `default none once include`
