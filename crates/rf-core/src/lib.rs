@@ -8,6 +8,7 @@ pub mod dxf;
 pub mod fitter;
 pub mod geometry;
 pub mod mask;
+pub mod report;
 pub mod ridge;
 pub mod sketch;
 pub mod solver;

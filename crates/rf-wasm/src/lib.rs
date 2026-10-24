@@ -8,6 +8,7 @@ use wasm_bindgen::prelude::*;
 
 use rf_core::fitter::{fit, fit_masked, FitterParams};
 use rf_core::mask::{MaskParams, MaskStroke};
+use rf_core::report::{summary_csv, summary_json};
 use rf_core::ridge::{detect_ridges as ridge_detect, RidgeParams};
 use rf_core::sketch::Sketch;
 use rf_core::solver::solve;
@@ -103,4 +104,18 @@ pub fn fit_sketch_masked(
         &params,
     );
     serde_json::to_string(&result).map_err(err)
+}
+
+/// Summarize a fit result (JSON) to a fit-report JSON.
+#[wasm_bindgen]
+pub fn fit_report_json(result_json: &str) -> Result<String, JsValue> {
+    let result: rf_core::fitter::FitterResult = parse(result_json)?;
+    Ok(summary_json(&result))
+}
+
+/// Summarize a fit result (JSON) to a one-row CSV.
+#[wasm_bindgen]
+pub fn fit_report_csv(result_json: &str) -> Result<String, JsValue> {
+    let result: rf_core::fitter::FitterResult = parse(result_json)?;
+    Ok(summary_csv(&result))
 }

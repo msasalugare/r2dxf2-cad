@@ -7,4 +7,5 @@ description = "Pure-Rust core for RasterFit: geometry, calibration, ridge, mask,
 
 [dependencies]
 serde = { workspace = true }
+serde_json = { workspace = true }
 nalgebra = { workspace = true }

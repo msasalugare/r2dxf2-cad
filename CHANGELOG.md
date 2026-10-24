@@ -25,6 +25,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **Mask into fitter**: `rf-core::fitter::fit_masked` resolves the weight map
   and filters centerlines below 0.5 weight; the sketch Fit uses the active mask
   strokes via a `fit_sketch_masked` WASM binding (native distractor test + e2e).
+- **Fit report**: `rf-core::report` summarizes a fit (RMS, median, 95th
+  percentile, rotation/translation) to JSON and CSV, exposed via
+  `fit_report_json`/`fit_report_csv` WASM bindings.
 
 - **M7** export core (`rf-core::dxf`, `rf-core::svg`): ASCII DXF export of
   `LINE`/`CIRCLE` on `geometry`/`construction` layers (mm) with a round-trip

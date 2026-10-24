@@ -57,9 +57,8 @@ npm run dev
 
 ## Limitations (known)
 
-- The mask now feeds the fitter (`fit_masked` filters centerlines by weight).
-  JSON/CSV report, zip project save/open, accessibility, and the final Docker
-  D1–D7 checks remain.
+- Fit report (JSON/CSV) exists in `rf-core` + WASM. Zip project save/open,
+  accessibility, and the final Docker D1–D7 checks remain.
 - PDF pages render at up to 600 DPI within a single-canvas size cap (per-tile
   native-resolution extraction is deferred); vector-only PDFs render as raster
   without a dedicated warning yet.

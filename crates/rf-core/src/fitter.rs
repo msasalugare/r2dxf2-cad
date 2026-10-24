@@ -55,6 +55,8 @@ pub struct FitterResult {
     pub converged: bool,
     /// True when the sketch has no orientation/position anchor (θ/t are gauged).
     pub gauge_warning: bool,
+    /// Final per-sample fit residuals (fit units).
+    pub residuals: Vec<f64>,
 }
 
 /// A sketch sample: an entity plus a fixed parameter along it.
@@ -218,6 +220,7 @@ pub fn fit(
         iterations,
         converged,
         gauge_warning: !has_orientation_anchor(sketch),
+        residuals: r,
     }
 }
 
