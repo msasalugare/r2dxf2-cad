@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **M6** fitter core (`rf-core::fitter`): jointly optimizes sketch geometry `q`
+  and the background transform `T = (θ, tx, ty)` against the raster centerlines
+  through a KKT system (constraints hold as truth), with a point-to-line
+  residual to the nearest masked centerline, Tikhonov gauge handling, and a
+  gauge warning for sketches without an orientation anchor. Native T3/T5 tests:
+  fit recovers offset ≤4 px and rotation ≤0.02° with RMS < 0.3 px and
+  ‖c‖∞ < 1e-9 mm; gauge does not drift θ.
+
 - **M5** sketch + solver core (`rf-core::sketch`, `rf-core::solver`): parametric
   points/lines/circles with stable IDs, 14 constraint types (Coincident,
   Horizontal/Vertical, Parallel/Perpendicular, EqualLength/EqualRadius, Tangent,

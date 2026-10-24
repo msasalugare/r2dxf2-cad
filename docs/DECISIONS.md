@@ -139,6 +139,22 @@ resolved from the live registries on 2026-10-24.
   auto-constraints, drag-to-solve, undo/redo, constraint panel) is browser UI
   tied to the WASM bridge.
 
+## M6 fitter decisions
+
+- **Unknowns**: geometry `q` (sketch parameters) and background
+  `T = (θ, tx, ty)` (scale locked to calibration). The sketch constraints are
+  treated as truth; the residual is the signed point-to-line distance from each
+  sketch sample (uniform along lines / arc length, ~1 sample per 2 px) to its
+  nearest centerline within a capture radius.
+- **Solve**: one joint Gauss–Newton step per iteration via the KKT system
+  `[JᵀJ + μD, Jcᵀ; Jc, −εI]`, where `J` is the fitter-residual Jacobian (dual
+  numbers over `q` + `T`) and `Jc` the constraint Jacobian. A Tikhonov prior on
+  `‖T − T_init‖` removes the transformation gauge; a gauge warning fires when the
+  sketch has no orientation/position anchor (no H/V/Angle/Fixed).
+- **Deferred**: robust loss (Cauchy/Tukey) and the tangent-alignment term, the
+  multi-phase pyramid (T-only → q-only → joint), per-primitive coverage, and the
+  heat-map report; those come with the browser/WASM integration and M7 polish.
+
 ## Docker
 
 - **`node:24-alpine`** (web stage) — matches the pinned Node 24 LTS.

@@ -14,23 +14,23 @@ use crate::sketch::{Constraint, Sketch};
 /// A dual number carrying a value and a full gradient w.r.t. the parameter
 /// vector. Used to evaluate constraint residuals and their exact Jacobian.
 #[derive(Clone)]
-struct Dual {
-    v: f64,
-    g: Vec<f64>,
+pub(crate) struct Dual {
+    pub(crate) v: f64,
+    pub(crate) g: Vec<f64>,
 }
 
 impl Dual {
-    fn constant(v: f64, n: usize) -> Self {
+    pub(crate) fn constant(v: f64, n: usize) -> Self {
         Dual { v, g: vec![0.0; n] }
     }
 
-    fn param(v: f64, index: usize, n: usize) -> Self {
+    pub(crate) fn param(v: f64, index: usize, n: usize) -> Self {
         let mut g = vec![0.0; n];
         g[index] = 1.0;
         Dual { v, g }
     }
 
-    fn abs(self) -> Self {
+    pub(crate) fn abs(self) -> Self {
         if self.v >= 0.0 {
             self
         } else {
@@ -38,6 +38,22 @@ impl Dual {
                 v: -self.v,
                 g: self.g.into_iter().map(|x| -x).collect(),
             }
+        }
+    }
+
+    pub(crate) fn sin(self) -> Self {
+        let c = self.v.cos();
+        Dual {
+            v: self.v.sin(),
+            g: self.g.into_iter().map(|x| x * c).collect(),
+        }
+    }
+
+    pub(crate) fn cos(self) -> Self {
+        let s = self.v.sin();
+        Dual {
+            v: self.v.cos(),
+            g: self.g.into_iter().map(|x| -x * s).collect(),
         }
     }
 }
@@ -116,7 +132,7 @@ impl Neg for Dual {
     }
 }
 
-fn hypot(a: Dual, b: Dual) -> Dual {
+pub(crate) fn hypot(a: Dual, b: Dual) -> Dual {
     let v = a.v.hypot(b.v);
     let g =
         a.g.iter()
@@ -126,7 +142,7 @@ fn hypot(a: Dual, b: Dual) -> Dual {
     Dual { v, g }
 }
 
-fn atan2(y: Dual, x: Dual) -> Dual {
+pub(crate) fn atan2(y: Dual, x: Dual) -> Dual {
     let v = y.v.atan2(x.v);
     let denom = x.v * x.v + y.v * y.v;
     let g =
@@ -278,8 +294,11 @@ fn evaluate(sketch: &Sketch, params: &[f64]) -> (Vec<(usize, usize)>, Vec<f64>, 
 }
 
 /// Residuals for a single constraint (as dual numbers).
-fn residual_vec(sketch: &Sketch, p: &[Dual], c: &Constraint) -> Vec<Dual> {
+pub(crate) fn residual_vec(sketch: &Sketch, p: &[Dual], c: &Constraint) -> Vec<Dual> {
     let n_points = sketch.points.len();
+    // Gradient length may exceed the slice length when the caller also carries
+    // transform parameters (the fitter); use the dual gradient length.
+    let grad_n = p.first().map(|d| d.g.len()).unwrap_or(0);
     let point = |id| {
         let i = sketch.point_index(id).expect("point exists");
         (p[2 * i].clone(), p[2 * i + 1].clone())
@@ -352,21 +371,21 @@ fn residual_vec(sketch: &Sketch, p: &[Dual], c: &Constraint) -> Vec<Dual> {
         Constraint::Distance(a, b, d) => {
             let (ax, ay) = point(a);
             let (bx, by) = point(b);
-            vec![hypot(bx - ax, by - ay) - Dual::constant(d, p.len())]
+            vec![hypot(bx - ax, by - ay) - Dual::constant(d, grad_n)]
         }
         Constraint::Angle(a, b, target) => {
             let (ax, ay) = line_dir(a);
             let (bx, by) = line_dir(b);
             let cross = ax.clone() * by.clone() - ay.clone() * bx.clone();
             let dot = ax * bx + ay * by;
-            vec![atan2(cross, dot) - Dual::constant(target, p.len())]
+            vec![atan2(cross, dot) - Dual::constant(target, grad_n)]
         }
-        Constraint::Radius(circle, r) => vec![radius(circle) - Dual::constant(r, p.len())],
+        Constraint::Radius(circle, r) => vec![radius(circle) - Dual::constant(r, grad_n)],
         Constraint::FixedPoint(p_, x, y) => {
             let (px, py) = point(p_);
             vec![
-                px - Dual::constant(x, p.len()),
-                py - Dual::constant(y, p.len()),
+                px - Dual::constant(x, grad_n),
+                py - Dual::constant(y, grad_n),
             ]
         }
         Constraint::PointOnLine(p_, l) => {

@@ -4,6 +4,7 @@
 //! use `f64` everywhere; `f32` is reserved for large raster buffers only.
 
 pub mod calibration;
+pub mod fitter;
 pub mod geometry;
 pub mod mask;
 pub mod ridge;
