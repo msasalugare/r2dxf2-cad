@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Viewer UX fixes**: middle-button pan (works while a tool is active),
+  two-finger pinch zoom + pan, more responsive wheel zoom, and tighter
+  fit padding.
+
 - **WASM bridge**: `rf-wasm` now exposes the core via wasm-bindgen
   (`core_version`, `solve_constraints`, `export_dxf`/`export_svg`,
   `detect_ridges`, `fit_sketch`) over a JSON boundary; a `wasm:build` script,
@@ -36,7 +40,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **Docker D-criteria verification**: D2/D3/D4/D5/D7 verified (healthcheck,
   non-root/read-only, wasm MIME + CSP, 16/16 e2e against the container, 27.6 MB
   image, offline works); D1/D6 marked unverifiable on this host (no Compose v2 /
-  buildx) in `docs/ENV.md`.
+  buildx) in `docs/ENV.md`. CI now covers D1 (`docker compose up`) and D6
+  (multi-arch `docker buildx build` via a `multiarch` job).
 
 - **M7** export core (`rf-core::dxf`, `rf-core::svg`): ASCII DXF export of
   `LINE`/`CIRCLE` on `geometry`/`construction` layers (mm) with a round-trip

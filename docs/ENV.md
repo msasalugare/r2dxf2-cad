@@ -126,10 +126,10 @@ host has no buildx or Compose v2 plugin — see above).
 
 | Criterion | Status | Evidence |
 | --- | --- | --- |
-| D1 `docker compose up --build` | ⚠️ not verbatim here | no Compose v2 plugin; equivalent `docker build` + `docker run` path verified |
+| D1 `docker compose up --build` | ⚠️ covered in CI | not verbatim here (no Compose v2); the `docker` CI job runs `docker compose up --build` |
 | D2 healthcheck < 10 s, non-root, read-only | ✅ | healthy in ~15 ms; `uid=101(nginx)`; write to `/usr/share/nginx/html` fails (read-only) |
 | D3 wasm `application/wasm` + CSP + local PDF.js worker | ✅ | `/wasm/rf_wasm_bg.wasm` → `application/wasm`; CSP has `wasm-unsafe-eval`; PDF import e2e passes |
 | D4 e2e against the container | ✅ | 16/16 Playwright tests pass against the running container |
 | D5 image < 30 MB | ✅ | 27.62 MB |
-| D6 multi-arch + wasm-bindgen CLI version check | ⚠️ multi-arch not here | the CLI-version check is in the Dockerfile and the single-arch build passed; `linux/arm64` needs buildx |
+| D6 multi-arch + wasm-bindgen CLI version check | ⚠️ covered in CI | the `multiarch` CI job runs `docker buildx build --platform linux/amd64,linux/arm64`; the CLI-version check is in the Dockerfile. Note: the arm64 leg recompiles wasm-bindgen-cli under qemu and is slow |
 | D7 works after network is disabled | ✅ | `offline.spec.ts` blocks all requests after load and still solves a sketch |

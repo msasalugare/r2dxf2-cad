@@ -13,6 +13,7 @@
 
 import {
   bestLevel,
+  clampZoom,
   fitCamera,
   panBy,
   screenToWorld,
@@ -40,8 +41,11 @@ export class RasterViewer {
   private raf = 0;
   private dragPointer: number | null = null;
   private dragHookActive = false;
+  private panPointer: number | null = null;
   private lastX = 0;
   private lastY = 0;
+  private pointers = new Map<number, { x: number; y: number }>();
+  private pinchStart: { dist: number; zoom: number; worldX: number; worldY: number } | null = null;
 
   /** Called after the camera changes (used to refresh the status bar). */
   onCameraChange: (() => void) | null = null;
@@ -86,7 +90,7 @@ export class RasterViewer {
     this.page = page;
     this.rasterTransform = IDENTITY;
     if (page) {
-      this.camera = fitCamera(this.viewWidth(), this.viewHeight(), page.meta.width, page.meta.height);
+      this.camera = fitCamera(this.viewWidth(), this.viewHeight(), page.meta.width, page.meta.height, 12);
     }
     this.scheduleRender();
     this.onCameraChange?.();
@@ -108,7 +112,7 @@ export class RasterViewer {
   fit(): void {
     if (!this.page) return;
     const bounds = this.worldBounds();
-    this.camera = fitCamera(this.viewWidth(), this.viewHeight(), bounds.width, bounds.height);
+    this.camera = fitCamera(this.viewWidth(), this.viewHeight(), bounds.width, bounds.height, 12);
     this.scheduleRender();
     this.onCameraChange?.();
   }
@@ -205,55 +209,118 @@ export class RasterViewer {
     const cx = e.clientX - rect.left;
     const cy = e.clientY - rect.top;
     const delta = e.deltaMode === 1 ? e.deltaY * 33 : e.deltaY;
-    const factor = Math.exp(-delta * 0.0015);
+    const factor = Math.exp(-delta * 0.0022);
     this.camera = zoomAt(this.camera, cx, cy, factor);
     this.scheduleRender();
     this.onCameraChange?.();
   };
 
   private onPointerDown = (e: PointerEvent): void => {
+    this.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    this.canvas.setPointerCapture(e.pointerId);
+
+    // Middle button always pans, even while a tool is active.
+    if (e.button === 1) {
+      this.panPointer = e.pointerId;
+      this.lastX = e.clientX;
+      this.lastY = e.clientY;
+      return;
+    }
     if (e.button !== 0) return;
+
+    // A second finger starts a pinch (zoom + pan).
+    if (this.pointers.size >= 2) {
+      this.startPinch();
+      return;
+    }
+
     if (this.onClick?.(e.clientX, e.clientY)) return;
     if (this.onDrag?.(e.clientX, e.clientY, 'start')) {
       this.dragHookActive = true;
       this.dragPointer = e.pointerId;
-      this.canvas.setPointerCapture(e.pointerId);
       return;
     }
-    this.dragPointer = e.pointerId;
+    this.panPointer = e.pointerId;
     this.lastX = e.clientX;
     this.lastY = e.clientY;
-    this.canvas.setPointerCapture(e.pointerId);
   };
 
   private onPointerMove = (e: PointerEvent): void => {
-    if (this.dragPointer !== e.pointerId) return;
-    if (this.dragHookActive) {
+    this.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
+    if (this.pinchStart && this.pointers.size >= 2) {
+      this.updatePinch();
+      return;
+    }
+
+    if (this.dragHookActive && this.dragPointer === e.pointerId) {
       this.onDrag?.(e.clientX, e.clientY, 'move');
       return;
     }
-    const dx = e.clientX - this.lastX;
-    const dy = e.clientY - this.lastY;
-    this.lastX = e.clientX;
-    this.lastY = e.clientY;
-    this.camera = panBy(this.camera, dx, dy);
-    this.scheduleRender();
-    this.onCameraChange?.();
+
+    if (this.panPointer === e.pointerId) {
+      const dx = e.clientX - this.lastX;
+      const dy = e.clientY - this.lastY;
+      this.lastX = e.clientX;
+      this.lastY = e.clientY;
+      this.camera = panBy(this.camera, dx, dy);
+      this.scheduleRender();
+      this.onCameraChange?.();
+    }
   };
 
   private onPointerUp = (e: PointerEvent): void => {
-    if (this.dragPointer !== e.pointerId) return;
-    if (this.dragHookActive) {
+    this.pointers.delete(e.pointerId);
+
+    if (this.dragHookActive && this.dragPointer === e.pointerId) {
       this.onDrag?.(e.clientX, e.clientY, 'end');
       this.dragHookActive = false;
+      this.dragPointer = null;
     }
-    this.dragPointer = null;
+    if (this.panPointer === e.pointerId) {
+      this.panPointer = null;
+    }
+    if (this.pointers.size < 2) {
+      this.pinchStart = null;
+    }
     try {
       this.canvas.releasePointerCapture(e.pointerId);
     } catch {
       // Pointer may already be released.
     }
   };
+
+  private startPinch(): void {
+    const pts = [...this.pointers.values()];
+    if (pts.length < 2) return;
+    const a = pts[0];
+    const b = pts[1];
+    const cx = (a.x + b.x) / 2;
+    const cy = (a.y + b.y) / 2;
+    const world = screenToWorld(this.camera, cx, cy);
+    this.pinchStart = {
+      dist: Math.hypot(a.x - b.x, a.y - b.y) || 1,
+      zoom: this.camera.zoom,
+      worldX: world.x,
+      worldY: world.y,
+    };
+  }
+
+  private updatePinch(): void {
+    if (!this.pinchStart) return;
+    const pts = [...this.pointers.values()];
+    if (pts.length < 2) return;
+    const a = pts[0];
+    const b = pts[1];
+    const dist = Math.hypot(a.x - b.x, a.y - b.y) || 1;
+    const zoom = clampZoom(this.pinchStart.zoom * (dist / this.pinchStart.dist));
+    const cx = (a.x + b.x) / 2;
+    const cy = (a.y + b.y) / 2;
+    // Keep the start world point under the current pinch centroid (zoom + pan).
+    this.camera = { zoom, x: cx - this.pinchStart.worldX * zoom, y: cy - this.pinchStart.worldY * zoom };
+    this.scheduleRender();
+    this.onCameraChange?.();
+  }
 
   private scheduleRender = (): void => {
     if (this.raf) return;
