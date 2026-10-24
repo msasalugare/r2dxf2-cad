@@ -6,11 +6,12 @@ constraints) to a calibrated raster drawing, with an optional mask.
 Everything runs locally in the browser. No accounts, no uploads, no analytics,
 no telemetry. The container serves a static build only — there is no backend.
 
-> **Status**: M6 (fitter core) landed. PNG/JPEG/WebP + PDF import, tiled
+> **Status**: M7 (export core) in progress. PNG/JPEG/WebP + PDF import, tiled
 > pyramid pan/zoom viewer, multi-page PDF navigation, IndexedDB autosave,
-> calibration, and the `rf-core` ridge/mask/sketch/solver/fitter cores are in
-> place (natively tested). The remaining work is the browser WASM bridge + UI,
-> export (M7), and polish.
+> calibration, and the `rf-core` ridge/mask/sketch/solver/fitter cores plus
+> DXF/SVG export are in place (natively tested). Remaining M7 work: JSON/CSV
+> report, zip project save/open, accessibility, performance, and the final
+> Docker D1–D7 checks.
 
 ## Quick start (Docker)
 
@@ -56,11 +57,10 @@ npm run dev
 
 ## Limitations (known)
 
-- M6: the fitter core is in `rf-core` (natively tested) but the full
-  import → calibrate → draw → fit → export workflow is not yet wired into the
-  browser: the interactive sketch editor, mask overlay, and fitter need the WASM
-  bridge (still deferred, see `docs/ENV.md`) plus the UI layer. Export/polish
-  arrive in M7.
+- M7 (in progress): DXF/SVG export exist in `rf-core`; JSON/CSV report, zip
+  project save/open, accessibility, and the final Docker criteria are still
+  open. The full browser workflow needs the WASM bridge (still deferred, see
+  `docs/ENV.md`) plus the interactive sketch/mask/fit UI.
 - PDF pages render at up to 600 DPI within a single-canvas size cap (per-tile
   native-resolution extraction is deferred); vector-only PDFs render as raster
   without a dedicated warning yet.

@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **M7** export core (`rf-core::dxf`, `rf-core::svg`): ASCII DXF export of
+  `LINE`/`CIRCLE` on `geometry`/`construction` layers (mm) with a round-trip
+  test (< 1e-6 mm, T14), and SVG export with a y-up → y-down flip.
+
 - **M6** fitter core (`rf-core::fitter`): jointly optimizes sketch geometry `q`
   and the background transform `T = (θ, tx, ty)` against the raster centerlines
   through a KKT system (constraints hold as truth), with a point-to-line

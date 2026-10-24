@@ -4,12 +4,14 @@
 //! use `f64` everywhere; `f32` is reserved for large raster buffers only.
 
 pub mod calibration;
+pub mod dxf;
 pub mod fitter;
 pub mod geometry;
 pub mod mask;
 pub mod ridge;
 pub mod sketch;
 pub mod solver;
+pub mod svg;
 
 // Modules are added as their milestones land (M2..M7):
 // pub mod calibration;

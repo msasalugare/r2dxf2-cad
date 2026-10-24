@@ -155,6 +155,18 @@ resolved from the live registries on 2026-10-24.
   multi-phase pyramid (T-only → q-only → joint), per-primitive coverage, and the
   heat-map report; those come with the browser/WASM integration and M7 polish.
 
+## M7 export decisions
+
+- **DXF** is emitted as ASCII R12 with an `ENTITIES` section of `LINE`/`CIRCLE`
+  on `geometry`/`construction` layers (mm, y-up). Coordinates are formatted with
+  9 decimals (trimmed) so a round-trip parse agrees to < 1e-6 mm (T14); the
+  round-trip parser is a small in-test reader, so no third-party DXF crate.
+- **SVG** flips y (world y-up → SVG y-down) via `viewBox` bounds and mirrors the
+  same geometry/layers.
+- **Deferred**: ARC export (the sketch model has no arc parameters until M8),
+  JSON/CSV fit-report, zip project save/open (fflate), accessibility (axe), and
+  the final Docker D1–D7 verification.
+
 ## Docker
 
 - **`node:24-alpine`** (web stage) — matches the pinned Node 24 LTS.
