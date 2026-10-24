@@ -31,6 +31,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **Zip project save/open**: `web/src/project.ts` packs `project.json` +
   `raster` into a `.rasterfit.zip` with fflate; toolbar Save downloads it and
   Open restores it (Vitest round-trip + e2e).
+- **Accessibility**: axe e2e scans assert no serious violations on the start
+  screen and loaded viewer; fixed the status-bar `role` misuse.
 
 - **M7** export core (`rf-core::dxf`, `rf-core::svg`): ASCII DXF export of
   `LINE`/`CIRCLE` on `geometry`/`construction` layers (mm) with a round-trip

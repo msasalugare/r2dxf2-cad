@@ -489,7 +489,7 @@ function markup(locale: Locale): string {
     </svg>
   </button>
 
-  <footer class="status-bar" role="status" aria-live="polite">
+  <footer class="status-bar" aria-live="polite" aria-atomic="true">
     <span id="status" class="status-text">${t(locale, 'status.ready')}</span>
     <span class="status-spacer"></span>
     <span id="coords" class="status-text"></span>

@@ -57,8 +57,8 @@ npm run dev
 
 ## Limitations (known)
 
-- Zip project save/open works. Accessibility (axe) and the final Docker D1–D7
-  checks remain.
+- Axe scans pass with no serious violations (one moderate `region` landmark
+  note remains). The final Docker D1–D7 checks remain.
 - PDF pages render at up to 600 DPI within a single-canvas size cap (per-tile
   native-resolution extraction is deferred); vector-only PDFs render as raster
   without a dedicated warning yet.
