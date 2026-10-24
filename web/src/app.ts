@@ -57,7 +57,14 @@ export function initApp(): () => void {
     () => (activePage ? { width: activePage.meta.width, height: activePage.meta.height } : null),
   );
 
-  const sketch = new SketchController(viewer, sketchPanel, locale, setStatus);
+  const sketch = new SketchController(viewer, sketchPanel, locale, setStatus, async () => {
+    if (!activePage) return null;
+    try {
+      return await importer.getGray(activePage.meta.pageIndex);
+    } catch {
+      return null;
+    }
+  });
 
   const refreshZoom = (): void => {
     zoom.textContent = tf(locale, 'status.zoom', {

@@ -44,7 +44,16 @@ interface WorkerResponse {
   id: number;
   ok: boolean;
   page?: RasterPage;
+  gray?: Uint8Array;
+  width?: number;
+  height?: number;
   error?: string;
+}
+
+interface GrayBuffer {
+  data: Uint8Array;
+  width: number;
+  height: number;
 }
 
 /** Thin request/response client over the raster worker. */
@@ -52,6 +61,7 @@ class RasterWorker {
   private worker: Worker;
   private nextId = 1;
   private pending = new Map<number, Pending>();
+  private grayPending = new Map<number, { resolve: (g: GrayBuffer) => void; reject: (e: Error) => void }>();
 
   constructor() {
     this.worker = new Worker(new URL('./raster.worker.ts', import.meta.url), {
@@ -59,6 +69,14 @@ class RasterWorker {
     });
     this.worker.onmessage = (e: MessageEvent<WorkerResponse>) => {
       const msg = e.data;
+      if (msg.gray !== undefined) {
+        const p = this.grayPending.get(msg.id);
+        if (!p) return;
+        this.grayPending.delete(msg.id);
+        if (msg.ok) p.resolve({ data: msg.gray, width: msg.width!, height: msg.height! });
+        else p.reject(new Error(msg.error ?? 'gray buffer unavailable'));
+        return;
+      }
       const pending = this.pending.get(msg.id);
       if (!pending) return;
       this.pending.delete(msg.id);
@@ -83,6 +101,15 @@ class RasterWorker {
 
   free(pageIndex: number): void {
     this.worker.postMessage({ type: 'free', pageIndex });
+  }
+
+  getGray(pageIndex: number): Promise<GrayBuffer> {
+    const id = this.nextId;
+    this.nextId += 1;
+    return new Promise<GrayBuffer>((resolve, reject) => {
+      this.grayPending.set(id, { resolve, reject });
+      this.worker.postMessage({ type: 'get-gray', id, pageIndex });
+    });
   }
 
   dispose(): void {
@@ -173,6 +200,11 @@ export class Importer {
   /** Free a page's worker-side gray8 buffer. */
   freeGray(pageIndex: number): void {
     this.worker.free(pageIndex);
+  }
+
+  /** Retrieve a page's gray8 analysis buffer (for ridge detection). */
+  getGray(pageIndex: number): Promise<{ data: Uint8Array; width: number; height: number }> {
+    return this.worker.getGray(pageIndex);
   }
 
   private disposePdf(): void {

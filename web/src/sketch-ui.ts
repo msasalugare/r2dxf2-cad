@@ -29,6 +29,7 @@ export class SketchController {
     private panel: HTMLElement,
     private locale: Locale,
     private onStatus: (msg: string, isError?: boolean) => void,
+    private getGray: () => Promise<{ data: Uint8Array; width: number; height: number } | null>,
   ) {}
 
   isActive(): boolean {
@@ -128,6 +129,55 @@ export class SketchController {
     }
   }
 
+  async fit(): Promise<void> {
+    if (this.points.length < 2) {
+      this.onStatus(t(this.locale, 'sketch.none'), true);
+      return;
+    }
+    try {
+      const gray = await this.getGray();
+      if (!gray) {
+        this.onStatus(t(this.locale, 'sketch.none'), true);
+        return;
+      }
+      const wasm = await loadWasm();
+      const ridgeParams = { scales: [1.0, 1.5, 2.5], background_radius: 24, min_strength: 5.0 };
+      const ridges = JSON.parse(
+        wasm.detect_ridges(gray.data, gray.width, gray.height, JSON.stringify(ridgeParams)),
+      ) as { x: number; y: number; direction: number; strength: number; scale: number }[];
+
+      const fitterParams = {
+        max_iterations: 40,
+        capture_radius: 12.0,
+        sample_step: 2.0,
+        tikhonov: 1e-6,
+        constraint_penalty: 1e-3,
+      };
+      const result = JSON.parse(
+        wasm.fit_sketch(
+          JSON.stringify(this.buildSketch()),
+          JSON.stringify(ridges),
+          JSON.stringify([0, 0, 0]),
+          JSON.stringify(fitterParams),
+        ),
+      ) as { params: number[]; rms_px: number; transform: [number, number, number] };
+
+      for (let i = 0; i < this.points.length; i += 1) {
+        this.points[i].x = result.params[2 * i];
+        this.points[i].y = result.params[2 * i + 1];
+      }
+      this.resultText = tf(this.locale, 'sketch.fitResult', {
+        r: result.rms_px.toFixed(3),
+        t: ((result.transform[0] * 180) / Math.PI).toFixed(3),
+      });
+      this.onStatus(this.resultText);
+      this.render();
+    } catch (err) {
+      this.onStatus(t(this.locale, 'error.failed'), true);
+      console.error('fit failed', err);
+    }
+  }
+
   clear(): void {
     this.points = [];
     this.pending = null;
@@ -160,6 +210,7 @@ export class SketchController {
       <p class="cal-hint">${t(locale, 'sketch.hint')}</p>
       <div class="cal-actions">
         <button id="sketch-solve" class="btn btn-primary" type="button">${t(locale, 'sketch.solve')}</button>
+        <button id="sketch-fit" class="btn" type="button">${t(locale, 'sketch.fit')}</button>
         <button id="sketch-clear" class="btn" type="button">${t(locale, 'sketch.clear')}</button>
       </div>
       <p class="cal-empty" id="sketch-result">${escapeHtml(this.resultText)}</p>
@@ -167,6 +218,7 @@ export class SketchController {
 
     this.panel.querySelector('#sketch-close')!.addEventListener('click', () => this.deactivate());
     this.panel.querySelector('#sketch-solve')!.addEventListener('click', () => void this.solve());
+    this.panel.querySelector('#sketch-fit')!.addEventListener('click', () => void this.fit());
     this.panel.querySelector('#sketch-clear')!.addEventListener('click', () => this.clear());
   }
 }

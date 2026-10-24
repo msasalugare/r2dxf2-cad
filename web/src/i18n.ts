@@ -64,6 +64,8 @@ const sr = {
   'sketch.clear': 'Obriši',
   'sketch.result': 'Rešeno — max rezidual {r}',
   'sketch.none': 'Nacrtajte skicu pa kliknite „Reši“',
+  'sketch.fit': 'Fit',
+  'sketch.fitResult': 'RMS {r} px · rotacija {t}°',
 } as const;
 
 const en: Record<keyof typeof sr, string> = {
@@ -128,6 +130,8 @@ const en: Record<keyof typeof sr, string> = {
   'sketch.clear': 'Clear',
   'sketch.result': 'Solved — max residual {r}',
   'sketch.none': 'Draw a sketch then click Solve',
+  'sketch.fit': 'Fit',
+  'sketch.fitResult': 'RMS {r} px · rotation {t}°',
 };
 
 const messages: Record<Locale, Record<keyof typeof sr, string>> = { sr, en };

@@ -23,7 +23,13 @@ interface FreeRequest {
   pageIndex: number;
 }
 
-type Request = BuildRequest | FreeRequest;
+interface GetGrayRequest {
+  type: 'get-gray';
+  id: number;
+  pageIndex: number;
+}
+
+type Request = BuildRequest | FreeRequest | GetGrayRequest;
 
 interface BuildOk {
   id: number;
@@ -37,7 +43,15 @@ interface BuildErr {
   error: string;
 }
 
-type Response = BuildOk | BuildErr;
+interface GetGrayOk {
+  id: number;
+  ok: true;
+  gray: Uint8Array;
+  width: number;
+  height: number;
+}
+
+type Response = BuildOk | BuildErr | GetGrayOk;
 
 // Minimal worker global typing without pulling in the whole `webworker` lib
 // (which would collide with the DOM lib used by the rest of the app).
@@ -46,8 +60,8 @@ const worker = globalThis as unknown as {
   postMessage(msg: Response, transfer?: Transferable[]): void;
 };
 
-/** gray8 buffers, keyed by page index, retained for M2/M3. */
-const grayBuffers = new Map<number, Uint8Array>();
+/** gray8 buffers, keyed by page index, retained for ridge/calibration. */
+const grayBuffers = new Map<number, { data: Uint8Array; width: number; height: number }>();
 
 /** Luminance (Rec. 709) from an RGBA pixel array. */
 function toGray8(rgba: Uint8ClampedArray): Uint8Array {
@@ -67,7 +81,11 @@ async function buildPyramid(bitmap: ImageBitmap, meta: PageMeta): Promise<Pyrami
   const fctx = full.getContext('2d', { willReadFrequently: true });
   if (!fctx) throw new Error('OffscreenCanvas 2D context unavailable');
   fctx.drawImage(bitmap, 0, 0, meta.width, meta.height);
-  grayBuffers.set(meta.pageIndex, toGray8(fctx.getImageData(0, 0, meta.width, meta.height).data));
+  grayBuffers.set(meta.pageIndex, {
+    data: toGray8(fctx.getImageData(0, 0, meta.width, meta.height).data),
+    width: meta.width,
+    height: meta.height,
+  });
 
   // The current level's full bitmap; higher levels are drawn from the previous.
   let source: ImageBitmap | OffscreenCanvas = full;
@@ -101,6 +119,18 @@ worker.onmessage = async (e) => {
   const req = e.data;
   if (req.type === 'free') {
     grayBuffers.delete(req.pageIndex);
+    return;
+  }
+  if (req.type === 'get-gray') {
+    const buf = grayBuffers.get(req.pageIndex);
+    if (buf) {
+      worker.postMessage(
+        { id: req.id, ok: true, gray: buf.data, width: buf.width, height: buf.height },
+        [buf.data.buffer],
+      );
+    } else {
+      worker.postMessage({ id: req.id, ok: false, error: 'gray buffer unavailable' });
+    }
     return;
   }
 
