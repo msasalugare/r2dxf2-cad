@@ -33,6 +33,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   Open restores it (Vitest round-trip + e2e).
 - **Accessibility**: axe e2e scans assert no serious violations on the start
   screen and loaded viewer; fixed the status-bar `role` misuse.
+- **Docker D-criteria verification**: D2/D3/D4/D5/D7 verified (healthcheck,
+  non-root/read-only, wasm MIME + CSP, 16/16 e2e against the container, 27.6 MB
+  image, offline works); D1/D6 marked unverifiable on this host (no Compose v2 /
+  buildx) in `docs/ENV.md`.
 
 - **M7** export core (`rf-core::dxf`, `rf-core::svg`): ASCII DXF export of
   `LINE`/`CIRCLE` on `geometry`/`construction` layers (mm) with a round-trip

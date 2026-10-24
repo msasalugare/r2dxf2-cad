@@ -58,7 +58,8 @@ npm run dev
 ## Limitations (known)
 
 - Axe scans pass with no serious violations (one moderate `region` landmark
-  note remains). The final Docker D1–D7 checks remain.
+  note remains). Docker criteria D2/D3/D4/D5/D7 are verified; D1/D6 need
+  Compose v2 / buildx (see `docs/ENV.md`).
 - PDF pages render at up to 600 DPI within a single-canvas size cap (per-tile
   native-resolution extraction is deferred); vector-only PDFs render as raster
   without a dedicated warning yet.
