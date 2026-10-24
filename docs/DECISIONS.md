@@ -70,6 +70,25 @@ resolved from the live registries on 2026-10-24.
   versioned metadata) behind a tiny hand-written promise wrapper; an in-memory
   fallback covers environments without IndexedDB.
 
+## M2 calibration decisions
+
+- **Solver placement**: the calibration math (`isotropic`, `anisotropic sx/sy`,
+  `affine 2×3`, `rotation`, residuals, leave-one-out, warnings) lives in
+  `rf-core::calibration` with native tests, and is mirrored in
+  `web/src/calibration.ts` so the browser can solve without the WASM core (the
+  wasm toolchain is deferred to M3). Both share the same ground-truth acceptance
+  vectors (0.1 mm/px scale, 0.5° rotation) to stay in lockstep within the 1e-9
+  relative reproducibility tolerance.
+- **Anisotropic solve** is the coupled 2×2 least squares from
+  `A·Δ ≈ L·d` for H/V segments (with `A = R(θ)·diag(sx, −sy)`), solved via
+  normal equations after orienting each raster vector to the expected world
+  direction; it requires ≥1 H and ≥1 V segment.
+- **Apply vs. store**: calibration `Apply` levels the raster (applies the
+  display rotation about the page centre) and stores the world scale (mm/px);
+  the scale is consumed by later milestones rather than visually shrinking the
+  image. The segment `Angle` orientation and sub-pixel ridge snap are deferred
+  to M3 (ridge).
+
 ## Docker
 
 - **`node:24-alpine`** (web stage) — matches the pinned Node 24 LTS.

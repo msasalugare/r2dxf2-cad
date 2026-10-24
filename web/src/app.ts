@@ -2,6 +2,7 @@
 // IndexedDB autosave together. No UI framework — plain DOM + Canvas.
 
 import { Autosave, type AutosaveMeta } from './autosave';
+import { CalibrationController } from './calibration-ui';
 import { IdbStore, MemoryKv, openDatabase } from './idb';
 import { detectLocale, t, tf, type Locale } from './i18n';
 import { Importer, type ImportDocument, type ImportErrorCode } from './import';
@@ -25,6 +26,7 @@ export function initApp(): () => void {
   const pagesPanel = document.querySelector<HTMLElement>('#pages-panel')!;
   const pagesList = document.querySelector<HTMLElement>('#pages-list')!;
   const autosavePrompt = document.querySelector<HTMLElement>('#autosave-prompt')!;
+  const calibrationPanel = document.querySelector<HTMLElement>('#calibration-panel')!;
   const fileInput = document.querySelector<HTMLInputElement>('#file-input')!;
   const status = document.querySelector<HTMLElement>('#status')!;
   const coords = document.querySelector<HTMLElement>('#coords')!;
@@ -45,6 +47,14 @@ export function initApp(): () => void {
     status.classList.toggle('is-error', isError);
   };
 
+  const calibration = new CalibrationController(
+    viewer,
+    calibrationPanel,
+    locale,
+    setStatus,
+    () => (activePage ? { width: activePage.meta.width, height: activePage.meta.height } : null),
+  );
+
   const refreshZoom = (): void => {
     zoom.textContent = tf(locale, 'status.zoom', {
       z: Math.round(viewer.getCamera().zoom * 100),
@@ -52,6 +62,8 @@ export function initApp(): () => void {
   };
 
   viewer.onCameraChange = refreshZoom;
+  viewer.onOverlay = (ctx) => calibration.drawOverlay(ctx);
+  viewer.onClick = (clientX, clientY) => calibration.handleClick(clientX, clientY);
 
   canvas.addEventListener('pointermove', (e) => {
     const p = viewer.clientToWorld(e.clientX, e.clientY);
@@ -59,7 +71,17 @@ export function initApp(): () => void {
       x: Math.round(p.x),
       y: Math.round(p.y),
     });
+    const rect = canvas.getBoundingClientRect();
+    calibration.setLastMouse(e.clientX - rect.left, e.clientY - rect.top);
   });
+
+  const saveSession = (blob: Blob, meta: AutosaveMeta): void => {
+    if (!autosave) return;
+    document.documentElement.removeAttribute('data-autosaved');
+    void autosave.save(blob, meta).then(() => {
+      document.documentElement.dataset.autosaved = 'true';
+    });
+  };
 
   const errorMessage = (code: ImportErrorCode): string => {
     switch (code) {
@@ -86,6 +108,7 @@ export function initApp(): () => void {
     startCard.hidden = true;
     toolbar.hidden = false;
     pageNav.hidden = nextDoc.pageCount <= 1;
+    calibration.deactivate();
     renderPagesList(nextDoc.pageCount, index);
     document.documentElement.dataset.raster = 'loaded';
     document.documentElement.dataset.pageCount = String(nextDoc.pageCount);
@@ -93,8 +116,8 @@ export function initApp(): () => void {
     setStatus(tf(locale, 'status.page', { n: index + 1, total: nextDoc.pageCount }));
     refreshZoom();
 
-    if (blob && autosave) {
-      void autosave.save(blob, autosaveMeta(nextDoc, index));
+    if (blob) {
+      saveSession(blob, autosaveMeta(nextDoc, index));
     }
   };
 
@@ -114,8 +137,8 @@ export function initApp(): () => void {
       viewer.setPage(page);
       renderPagesList(doc.pageCount, index);
       setStatus(tf(locale, 'status.page', { n: index + 1, total: doc.pageCount }));
-      if (originalBlob && autosave) {
-        void autosave.save(originalBlob, autosaveMeta(doc, index));
+      if (originalBlob) {
+        saveSession(originalBlob, autosaveMeta(doc, index));
       }
     } catch {
       setStatus(t(locale, 'error.failed'), true);
@@ -182,6 +205,14 @@ export function initApp(): () => void {
   document.querySelector('#fit-btn')!.addEventListener('click', () => viewer.fit());
   document.querySelector('#zoom-out-btn')!.addEventListener('click', () => viewer.zoomBy(1 / 1.25));
   document.querySelector('#zoom-in-btn')!.addEventListener('click', () => viewer.zoomBy(1.25));
+  document.querySelector('#calibrate-btn')!.addEventListener('click', () => {
+    if (!activePage) {
+      setStatus(t(locale, 'calibrate.result.none'), true);
+      return;
+    }
+    if (calibration.isActive()) calibration.deactivate();
+    else calibration.activate();
+  });
   document.querySelector('#prev-btn')!.addEventListener('click', () => void showPage(pageIndex - 1));
   document.querySelector('#next-btn')!.addEventListener('click', () => void showPage(pageIndex + 1));
   document.querySelector('#pages-toggle')!.addEventListener('click', () => {
@@ -290,6 +321,8 @@ function markup(locale: Locale): string {
   <div class="toolbar" role="toolbar" aria-label="Viewer" hidden>
     <button id="toolbar-open" class="tool-btn" type="button" title="${t(locale, 'start.open')}">${t(locale, 'start.open')}</button>
     <span class="toolbar-spacer"></span>
+    <button id="calibrate-btn" class="tool-btn" type="button">${t(locale, 'toolbar.calibrate')}</button>
+    <span class="toolbar-spacer"></span>
     <button id="zoom-out-btn" class="tool-btn" type="button" title="${t(locale, 'viewer.zoomOut')}">−</button>
     <button id="fit-btn" class="tool-btn" type="button" title="${t(locale, 'viewer.fit')}">${t(locale, 'viewer.fit')}</button>
     <button id="zoom-in-btn" class="tool-btn" type="button" title="${t(locale, 'viewer.zoomIn')}">+</button>
@@ -305,6 +338,8 @@ function markup(locale: Locale): string {
     <h2 class="panel-title">${t(locale, 'pages.title')}</h2>
     <ol class="pages-list" id="pages-list"></ol>
   </aside>
+
+  <aside class="panel panel-wide" id="calibration-panel" aria-label="${t(locale, 'calibrate.title')}" hidden></aside>
 
   <div class="autosave-prompt" id="autosave-prompt" role="alertdialog" aria-labelledby="autosave-text" hidden>
     <p id="autosave-text">${t(locale, 'autosave.prompt')}</p>

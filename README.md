@@ -6,10 +6,10 @@ constraints) to a calibrated raster drawing, with an optional mask.
 Everything runs locally in the browser. No accounts, no uploads, no analytics,
 no telemetry. The container serves a static build only — there is no backend.
 
-> **Status**: M1 (import + viewer) landed. PNG/JPEG/WebP and PDF import,
-> tiled pyramid pan/zoom viewer, multi-page PDF navigation, and IndexedDB
-> autosave (Continue/Discard) are in place. Calibration/ridge/mask/sketch/fitter
-> arrive in M2–M6.
+> **Status**: M2 (calibration) landed. PNG/JPEG/WebP + PDF import, tiled pyramid
+> pan/zoom viewer, multi-page PDF navigation, IndexedDB autosave, and a
+> calibration tool (segments → isotropic/anisotropic scale, rotation, Level,
+> report) are in place. Ridge/mask/sketch/fitter arrive in M3–M6.
 
 ## Quick start (Docker)
 
@@ -42,6 +42,8 @@ npm run dev
   bundled synthetic drawing.
 - Pan by dragging, zoom with the wheel (toward the cursor), `+`/`-` zoom, `0`
   to fit the page.
+- `Calibrate`: click two points per segment, enter its real length (mm/cm/m/in)
+  and orientation, then Solve → Apply. `Level` levels a clicked line.
 - Multi-page PDFs: use the Previous/Next buttons or the Pages panel.
 - Theme follows `prefers-color-scheme`; language follows `navigator.language`
   (Serbian Latin / English).
@@ -53,10 +55,13 @@ npm run dev
 
 ## Limitations (known)
 
-- M1: no calibration/fitting yet — see the milestone list in `docs/` and
-  `CHANGELOG.md`. PDF pages render at up to 600 DPI within a single-canvas
-  size cap (per-tile native-resolution extraction is deferred); vector-only
-  PDFs render as raster without a dedicated warning yet.
+- M2: no ridge/mask/sketch/fitting yet — see the milestone list in `docs/` and
+  `CHANGELOG.md`. Calibration applies the rotation (levels the background); the
+  world scale (mm/px) is stored and consumed by later milestones, and the
+  segment Angle orientation + sub-pixel ridge snap are deferred to M3.
+- PDF pages render at up to 600 DPI within a single-canvas size cap (per-tile
+  native-resolution extraction is deferred); vector-only PDFs render as raster
+  without a dedicated warning yet.
 - Multi-arch (`linux/arm64`) builds require Docker Buildx, which is not present
   in the original development environment (see `docs/ENV.md`).
 

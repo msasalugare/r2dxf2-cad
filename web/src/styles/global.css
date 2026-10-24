@@ -287,6 +287,137 @@ body.is-dragging .start-card {
   border-color: var(--color-accent);
 }
 
+/* --- Calibration panel ------------------------------------------------- */
+.panel-wide {
+  width: 300px;
+}
+
+.panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-8);
+  margin-bottom: var(--space-8);
+}
+
+.panel-head .panel-title {
+  margin: 0;
+}
+
+.cal-hint {
+  margin: 0 0 var(--space-12);
+  font-size: var(--font-size-secondary);
+  line-height: var(--line-height-secondary);
+  color: var(--color-text-secondary);
+}
+
+.cal-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+  margin-bottom: var(--space-12);
+}
+
+.cal-actions .btn {
+  min-height: var(--target-fine);
+  padding: 0 var(--space-8);
+  font-size: var(--font-size-secondary);
+}
+
+.cal-segments {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+  margin: 0 0 var(--space-12);
+  padding: 0;
+  list-style: none;
+}
+
+.cal-segment {
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+}
+
+.cal-label {
+  min-width: 52px;
+  font-size: var(--font-size-secondary);
+  color: var(--color-text-secondary);
+}
+
+.cal-length {
+  width: 80px;
+  min-height: var(--target-fine);
+  padding: 0 var(--space-8);
+  font: inherit;
+  font-variant-numeric: var(--font-variant-numeric-tabular);
+  color: var(--color-text-primary);
+  background: var(--color-surface-field);
+  border: var(--border-width) solid var(--color-divider);
+  border-radius: var(--radius-control);
+}
+
+.cal-orientation {
+  min-height: var(--target-fine);
+  font: inherit;
+  color: var(--color-text-primary);
+  background: var(--color-surface-field);
+  border: var(--border-width) solid var(--color-divider);
+  border-radius: var(--radius-control);
+}
+
+.cal-delete {
+  margin-left: auto;
+}
+
+.cal-stats {
+  margin: 0 0 var(--space-8);
+}
+
+.cal-stats > div {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-8);
+}
+
+.cal-stats dt {
+  color: var(--color-text-secondary);
+}
+
+.cal-stats dd {
+  margin: 0;
+  font-variant-numeric: var(--font-variant-numeric-tabular);
+}
+
+.cal-subhead {
+  margin: var(--space-8) 0 var(--space-4);
+  font-size: var(--font-size-secondary);
+  color: var(--color-text-secondary);
+}
+
+.cal-residuals,
+.cal-warnings {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--font-size-secondary);
+  font-variant-numeric: var(--font-variant-numeric-tabular);
+}
+
+.cal-warnings {
+  margin-top: var(--space-8);
+}
+
+.cal-warning {
+  color: var(--color-warning);
+}
+
+.cal-empty {
+  margin: 0;
+  font-size: var(--font-size-secondary);
+  color: var(--color-text-secondary);
+}
+
 /* --- Autosave prompt --------------------------------------------------- */
 .autosave-prompt {
   position: absolute;

@@ -28,6 +28,7 @@ test('autosave offers Continue/Discard on reload after a file import', async ({ 
   await page.goto('/');
   await page.locator('#file-input').setInputFiles(tinyPng);
   await expect(page.locator('html')).toHaveAttribute('data-raster', 'loaded');
+  await expect(page.locator('html')).toHaveAttribute('data-autosaved', 'true');
 
   await page.reload();
   const prompt = page.locator('#autosave-prompt');

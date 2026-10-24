@@ -1,13 +1,21 @@
 // Canvas2D raster viewer: dot-grid background plus a tiled pyramid renderer
 // with f64 pan/zoom (zoom-to-cursor), devicePixelRatio-aware, and 60 FPS via
 // dirty-flag + requestAnimationFrame batching.
+//
+// Coordinate spaces:
+// - raster `(u, v)`: image pixels (y-down).
+// - world `(x, y)`: millimetres after calibration (y-up); equal to raster until
+//   a calibration transform is applied.
+// - screen: CSS pixels on the canvas.
+//
+// The raster is drawn through an affine `rasterTransform` (default identity)
+// and then the pan/zoom camera.
 
 import {
   bestLevel,
   fitCamera,
   panBy,
   screenToWorld,
-  worldToScreen,
   zoomAt,
   type Camera,
 } from './camera';
@@ -16,6 +24,11 @@ import { TILE_SIZE, tileHeight, tileIndex, tileWidth, type RasterPage } from './
 const GRID_SPACING = 24; // CSS px, mirrors --geometry-viewer-grid-spacing
 const DOT_RADIUS = 1;
 
+/** Affine as Canvas 2D coefficients: `[a, b, c, d, e, f]`. */
+export type Affine = [number, number, number, number, number, number];
+
+const IDENTITY: Affine = [1, 0, 0, 1, 0, 0];
+
 function cssVar(el: Element, name: string, fallback: string): string {
   return getComputedStyle(el).getPropertyValue(name).trim() || fallback;
 }
@@ -23,6 +36,7 @@ function cssVar(el: Element, name: string, fallback: string): string {
 export class RasterViewer {
   private camera: Camera = { zoom: 1, x: 0, y: 0 };
   private page: RasterPage | null = null;
+  private rasterTransform: Affine = IDENTITY;
   private raf = 0;
   private dragPointer: number | null = null;
   private lastX = 0;
@@ -30,6 +44,10 @@ export class RasterViewer {
 
   /** Called after the camera changes (used to refresh the status bar). */
   onCameraChange: (() => void) | null = null;
+  /** Called after the raster layer, in CSS-px space, for overlays. */
+  onOverlay: ((ctx: CanvasRenderingContext2D, w: number, h: number) => void) | null = null;
+  /** If set and returns true, a pointer press is consumed as a click (no pan). */
+  onClick: ((clientX: number, clientY: number) => boolean) | null = null;
 
   constructor(private canvas: HTMLCanvasElement) {
     this.canvas.addEventListener('wheel', this.onWheel, { passive: false });
@@ -45,9 +63,28 @@ export class RasterViewer {
     return this.camera;
   }
 
+  getRasterTransform(): Affine {
+    return [...this.rasterTransform] as Affine;
+  }
+
+  setRasterTransform(t: Affine): void {
+    this.rasterTransform = [...t] as Affine;
+    this.scheduleRender();
+    this.onCameraChange?.();
+  }
+
+  resetRasterTransform(): void {
+    this.rasterTransform = IDENTITY;
+    this.scheduleRender();
+    this.onCameraChange?.();
+  }
+
   setPage(page: RasterPage | null): void {
     this.page = page;
-    if (page) this.camera = fitCamera(this.viewWidth(), this.viewHeight(), page.meta.width, page.meta.height);
+    this.rasterTransform = IDENTITY;
+    if (page) {
+      this.camera = fitCamera(this.viewWidth(), this.viewHeight(), page.meta.width, page.meta.height);
+    }
     this.scheduleRender();
     this.onCameraChange?.();
   }
@@ -59,18 +96,34 @@ export class RasterViewer {
     this.onCameraChange?.();
   }
 
-  /** Fit the current page into the viewport. */
+  /** Fit the current page (in world space) into the viewport. */
   fit(): void {
     if (!this.page) return;
-    this.camera = fitCamera(this.viewWidth(), this.viewHeight(), this.page.meta.width, this.page.meta.height);
+    const bounds = this.worldBounds();
+    this.camera = fitCamera(this.viewWidth(), this.viewHeight(), bounds.width, bounds.height);
     this.scheduleRender();
     this.onCameraChange?.();
   }
 
-  /** World (raster px) coordinates under a client point. */
+  /** World coordinates (post-transform) under a client point. */
   clientToWorld(clientX: number, clientY: number): { x: number; y: number } {
     const rect = this.canvas.getBoundingClientRect();
     return screenToWorld(this.camera, clientX - rect.left, clientY - rect.top);
+  }
+
+  /** Raster coordinates (pre-transform) under a client point, or null if singular. */
+  clientToRaster(clientX: number, clientY: number): { x: number; y: number } | null {
+    const rect = this.canvas.getBoundingClientRect();
+    return this.screenToRaster(clientX - rect.left, clientY - rect.top);
+  }
+
+  /** Map a raster point to screen CSS coordinates. */
+  rasterToScreen(rx: number, ry: number): { x: number; y: number } {
+    const m = this.combined();
+    return {
+      x: m[0] * rx + m[2] * ry + m[4],
+      y: m[1] * rx + m[3] * ry + m[5],
+    };
   }
 
   destroy(): void {
@@ -91,6 +144,53 @@ export class RasterViewer {
     return this.canvas.clientHeight;
   }
 
+  /** Combined raster→screen affine `[a, b, c, d, e, f]`. */
+  private combined(): Affine {
+    const t = this.rasterTransform;
+    const z = this.camera.zoom;
+    return [z * t[0], z * t[1], z * t[2], z * t[3], z * t[4] + this.camera.x, z * t[5] + this.camera.y];
+  }
+
+  private screenToRaster(sx: number, sy: number): { x: number; y: number } | null {
+    const m = this.combined();
+    const det = m[0] * m[3] - m[2] * m[1];
+    if (Math.abs(det) < 1e-12) return null;
+    const dx = sx - m[4];
+    const dy = sy - m[5];
+    return {
+      x: (m[3] * dx - m[2] * dy) / det,
+      y: (-m[1] * dx + m[0] * dy) / det,
+    };
+  }
+
+  /** World-space bounding box of the raster (width/height in world units). */
+  private worldBounds(): { width: number; height: number } {
+    const page = this.page;
+    if (!page) return { width: 1, height: 1 };
+    const t = this.rasterTransform;
+    const W = page.meta.width;
+    const H = page.meta.height;
+    const corners = [
+      [0, 0],
+      [W, 0],
+      [W, H],
+      [0, H],
+    ] as const;
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    for (const [u, v] of corners) {
+      const x = t[0] * u + t[2] * v + t[4];
+      const y = t[1] * u + t[3] * v + t[5];
+      minX = Math.min(minX, x);
+      minY = Math.min(minY, y);
+      maxX = Math.max(maxX, x);
+      maxY = Math.max(maxY, y);
+    }
+    return { width: maxX - minX, height: maxY - minY };
+  }
+
   private onWheel = (e: WheelEvent): void => {
     e.preventDefault();
     const rect = this.canvas.getBoundingClientRect();
@@ -105,6 +205,7 @@ export class RasterViewer {
 
   private onPointerDown = (e: PointerEvent): void => {
     if (e.button !== 0) return;
+    if (this.onClick?.(e.clientX, e.clientY)) return;
     this.dragPointer = e.pointerId;
     this.lastX = e.clientX;
     this.lastY = e.clientY;
@@ -159,6 +260,7 @@ export class RasterViewer {
     ctx.fillRect(0, 0, w, h);
     this.drawGrid(ctx, w, h);
     if (this.page) this.drawRaster(ctx, w, h);
+    this.onOverlay?.(ctx, w, h);
   };
 
   private drawGrid(ctx: CanvasRenderingContext2D, w: number, h: number): void {
@@ -176,23 +278,51 @@ export class RasterViewer {
     const page = this.page;
     if (!page) return;
 
-    const level = page.levels[bestLevel(this.camera.zoom, page.levels.length - 1)];
-    const scale = level.scale;
+    const m = this.combined();
+    const det = m[0] * m[3] - m[2] * m[1];
+    if (Math.abs(det) < 1e-12) return;
 
-    const topLeft = screenToWorld(this.camera, 0, 0);
-    const bottomRight = screenToWorld(this.camera, w, h);
-    const lx0 = Math.min(topLeft.x, bottomRight.x) * scale;
-    const ly0 = Math.min(topLeft.y, bottomRight.y) * scale;
-    const lx1 = Math.max(topLeft.x, bottomRight.x) * scale;
-    const ly1 = Math.max(topLeft.y, bottomRight.y) * scale;
+    // Choose the pyramid level so raster pixels ≈ screen pixels.
+    const t = this.rasterTransform;
+    const rasterZoom =
+      this.camera.zoom * Math.max(Math.hypot(t[0], t[1]), Math.hypot(t[2], t[3]));
+    const level = page.levels[bestLevel(rasterZoom, page.levels.length - 1)];
 
-    const col0 = Math.max(0, Math.floor(lx0 / TILE_SIZE));
-    const row0 = Math.max(0, Math.floor(ly0 / TILE_SIZE));
-    const col1 = Math.min(level.tileCols - 1, Math.floor((lx1 - 1) / TILE_SIZE));
-    const row1 = Math.min(level.tileRows - 1, Math.floor((ly1 - 1) / TILE_SIZE));
+    // Raster-space bounding box of the visible screen rectangle.
+    let minU = Infinity;
+    let minV = Infinity;
+    let maxU = -Infinity;
+    let maxV = -Infinity;
+    for (const [sx, sy] of [
+      [0, 0],
+      [w, 0],
+      [w, h],
+      [0, h],
+    ] as const) {
+      const dx = sx - m[4];
+      const dy = sy - m[5];
+      const u = (m[3] * dx - m[2] * dy) / det;
+      const v = (-m[1] * dx + m[0] * dy) / det;
+      minU = Math.min(minU, u);
+      minV = Math.min(minV, v);
+      maxU = Math.max(maxU, u);
+      maxV = Math.max(maxV, v);
+    }
+    minU = Math.max(0, minU);
+    minV = Math.max(0, minV);
+    maxU = Math.min(page.meta.width, maxU);
+    maxV = Math.min(page.meta.height, maxV);
+    if (maxU <= minU || maxV <= minV) return;
 
+    const col0 = Math.floor(minU / TILE_SIZE);
+    const row0 = Math.floor(minV / TILE_SIZE);
+    const col1 = Math.min(level.tileCols - 1, Math.floor((maxU - 1) / TILE_SIZE));
+    const row1 = Math.min(level.tileRows - 1, Math.floor((maxV - 1) / TILE_SIZE));
+
+    ctx.save();
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = 'high';
+    ctx.transform(m[0], m[1], m[2], m[3], m[4], m[5]);
 
     for (let row = row0; row <= row1; row += 1) {
       for (let col = col0; col <= col1; col += 1) {
@@ -200,9 +330,9 @@ export class RasterViewer {
         if (!tile) continue;
         const tw = tileWidth(level, col);
         const th = tileHeight(level, row);
-        const origin = worldToScreen(this.camera, (col * TILE_SIZE) / scale, (row * TILE_SIZE) / scale);
-        ctx.drawImage(tile, origin.x, origin.y, (tw / scale) * this.camera.zoom, (th / scale) * this.camera.zoom);
+        ctx.drawImage(tile, col * TILE_SIZE, row * TILE_SIZE, tw, th);
       }
     }
+    ctx.restore();
   }
 }

@@ -3,6 +3,7 @@
 //! Module layout follows the project architecture. Precision-sensitive values
 //! use `f64` everywhere; `f32` is reserved for large raster buffers only.
 
+pub mod calibration;
 pub mod geometry;
 
 // Modules are added as their milestones land (M2..M7):
