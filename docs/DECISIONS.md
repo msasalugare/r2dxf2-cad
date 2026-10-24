@@ -41,8 +41,34 @@ resolved from the live registries on 2026-10-24.
 - **@types/node 24.19.2** — Node types matching the pinned Node 24 LTS runtime.
 - **No UI framework** — plain DOM + Canvas, per the size/lean requirement.
 - **No icon library** — inline SVG, per the requirement.
-- **No PDF.js yet** — added in M1 (import). Will be `pdfjs-dist 6.4.299`,
-  vendored worker + fonts, lazy-loaded.
+- **`pdfjs-dist 6.4.299`** (Apache-2.0) — added in M1 (import). Lazy-loaded
+  dynamic import so the initial bundle stays small (PDF.js main chunk ~129 KB
+  gzip, loaded only on first PDF import). The worker
+  (`build/pdf.worker.min.mjs`) is imported via `?url` and assigned to
+  `GlobalWorkerOptions.workerSrc`; CMaps, standard fonts, wasm decoders, and ICC
+  profiles are copied from `node_modules/pdfjs-dist/{cmaps,standard_fonts,wasm,
+  iccs}` into `dist/pdfjs/` by an inline Vite plugin and referenced with
+  `cMapUrl`/`standardFontDataUrl`/`wasmUrl`/`iccUrl` — so PDF.js never fetches
+  anything from a CDN (satisfies the privacy/CSP/offline requirements).
+
+## M1 import & viewer decisions
+
+- **Decode/pyramid split**: `createImageBitmap` (raster images) and PDF.js
+  rendering (PDF) produce a full-res `ImageBitmap`; a dedicated module Web
+  Worker (`raster.worker.ts`) turns it into the gray8 analysis buffer (Rec. 709
+  luminance, retained worker-side for M2/M3) and the ImageBitmap tile pyramid
+  (256 px tiles, levels halved with `ceil` so edge pixels are never lost). Only
+  the pyramid tiles are transferred to the main thread.
+- **PDF page rasterization runs on the main thread** (pdf.js's main-thread
+  `render` API accepts a DOM canvas, not `OffscreenCanvas`, in its public types);
+  the pixel-heavy gray8 + pyramid work still happens in the worker. Rendering is
+  capped to a single canvas (8192 px/edge, 64 MP area) with the effective DPI
+  recorded; true per-tile native-resolution rendering is deferred.
+- **Raster images report `dpi = 0`** (unknown) — mm coordinates arrive with
+  calibration (M2). PDF pages report their effective render DPI.
+- **Autosave** uses two IndexedDB stores (`meta` + `raster`, blob separate from
+  versioned metadata) behind a tiny hand-written promise wrapper; an in-memory
+  fallback covers environments without IndexedDB.
 
 ## Docker
 

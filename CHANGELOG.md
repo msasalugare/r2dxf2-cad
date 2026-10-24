@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **M1** import + viewer: PNG/JPEG/WebP (via `createImageBitmap`) and PDF
+  (via PDF.js 6.4.299, lazy-loaded, worker + CMaps + standard fonts + wasm + ICC
+  vendored locally) import; a raster worker builds the gray8 analysis buffer and
+  an ImageBitmap tile pyramid; Canvas2D viewer with f64 pan/zoom (zoom-to-cursor,
+  wheel + pointer drag, fit/zoom keyboard shortcuts), multi-page PDF navigation
+  (Previous/Next + Pages panel), and a single-session IndexedDB autosave with an
+  explicit Continue/Discard prompt.
+- "Try a sample" now loads a bundled synthetic drawing end-to-end.
+- `docs/DECISIONS.md` records the PDF.js asset vendoring and worker split.
+
+## [0.1.0] — M0
+
+### Added
+
 - **M0** project skeleton: Cargo workspace (`rf-core`, `rf-wasm`), Vite +
   TypeScript web app (no UI framework), Dockerfile + Compose + nginx, GitHub
   Actions CI, design tokens, light/dark theme, Serbian (Latin)/English i18n,

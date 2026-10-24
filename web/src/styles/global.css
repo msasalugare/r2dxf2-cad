@@ -40,6 +40,11 @@ body {
   outline-offset: var(--focus-offset);
 }
 
+/* The `hidden` attribute must win over any author `display` rule. */
+[hidden] {
+  display: none !important;
+}
+
 /* --- Start screen card ------------------------------------------------ */
 .start-card {
   position: absolute;
@@ -175,6 +180,157 @@ body {
 body.is-dragging .start-card {
   border-color: var(--color-accent);
   box-shadow: 0 0 0 2px var(--color-accent), var(--shadow-overlay);
+}
+
+/* --- Viewer toolbar ---------------------------------------------------- */
+.toolbar {
+  position: absolute;
+  top: var(--space-12);
+  left: var(--space-12);
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-4);
+  background: var(--color-surface-panel);
+  border: var(--border-width) solid var(--color-divider);
+  border-radius: var(--radius-control);
+  box-shadow: var(--shadow-floating);
+  z-index: var(--z-panel);
+}
+
+.tool-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: var(--target-fine);
+  min-height: var(--target-fine);
+  padding: 0 var(--space-8);
+  font: inherit;
+  font-variant-numeric: var(--font-variant-numeric-tabular);
+  color: var(--color-text-primary);
+  background: transparent;
+  border: var(--border-width) solid transparent;
+  border-radius: var(--radius-control);
+  cursor: pointer;
+  transition: var(--transition-interactive);
+}
+
+.tool-btn:hover {
+  background: var(--color-control-hover-surface);
+}
+
+.tool-btn:active {
+  background: var(--color-control-active-surface);
+}
+
+.toolbar-spacer {
+  width: var(--space-4);
+}
+
+.page-nav {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-4);
+}
+
+/* --- Pages panel ------------------------------------------------------- */
+.panel {
+  position: absolute;
+  top: 56px;
+  left: var(--space-12);
+  width: 200px;
+  max-height: min(320px, calc(100% - 120px));
+  overflow: auto;
+  padding: var(--space-16);
+  background: var(--color-surface-panel);
+  border: var(--border-width) solid var(--color-divider);
+  border-radius: var(--radius-overlay);
+  box-shadow: var(--shadow-overlay);
+  z-index: var(--z-panel);
+}
+
+.panel-title {
+  margin: 0 0 var(--space-8);
+  font-size: var(--font-size-heading);
+  line-height: var(--line-height-heading);
+}
+
+.pages-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(40px, 1fr));
+  gap: var(--space-4);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.pages-item {
+  width: 100%;
+  min-height: var(--target-fine);
+  font: inherit;
+  font-variant-numeric: var(--font-variant-numeric-tabular);
+  color: var(--color-text-primary);
+  background: var(--color-surface-panel);
+  border: var(--border-width) solid var(--color-divider);
+  border-radius: var(--radius-control);
+  cursor: pointer;
+  transition: var(--transition-interactive);
+}
+
+.pages-item:hover {
+  background: var(--color-control-hover-surface);
+}
+
+.pages-item[aria-current='page'] {
+  color: var(--color-accent-contrast);
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+}
+
+/* --- Autosave prompt --------------------------------------------------- */
+.autosave-prompt {
+  position: absolute;
+  bottom: 48px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: var(--space-16);
+  padding: var(--space-16) var(--space-24);
+  background: var(--color-surface-panel);
+  border: var(--border-width) solid var(--color-divider);
+  border-radius: var(--radius-overlay);
+  box-shadow: var(--shadow-overlay);
+  z-index: var(--z-overlay);
+}
+
+.autosave-prompt p {
+  margin: 0;
+}
+
+.autosave-actions {
+  display: flex;
+  gap: var(--space-8);
+}
+
+/* --- Status bar -------------------------------------------------------- */
+.status-spacer {
+  flex: 1;
+}
+
+.status-text.is-error {
+  color: var(--color-danger);
+}
+
+.status-zoom {
+  min-width: 96px;
+  text-align: right;
+  margin-left: var(--space-16);
+}
+
+#coords {
+  min-width: 120px;
+  text-align: right;
 }
 
 @keyframes fade-in {
