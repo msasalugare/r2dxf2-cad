@@ -70,6 +70,9 @@ const sr = {
   'mask.title': 'Maska',
   'mask.hint': 'Prevucite da crtate masku',
   'mask.exclude': 'Isključi',
+  'project.save': 'Sačuvaj projekat',
+  'project.open': 'Otvori projekat',
+  'project.saved': 'Projekat sačuvan',
 } as const;
 
 const en: Record<keyof typeof sr, string> = {
@@ -140,6 +143,9 @@ const en: Record<keyof typeof sr, string> = {
   'mask.title': 'Mask',
   'mask.hint': 'Drag to paint a mask',
   'mask.exclude': 'Exclude',
+  'project.save': 'Save project',
+  'project.open': 'Open project',
+  'project.saved': 'Project saved',
 };
 
 const messages: Record<Locale, Record<keyof typeof sr, string>> = { sr, en };

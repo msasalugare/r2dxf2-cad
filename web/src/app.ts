@@ -8,6 +8,7 @@ import { SketchController } from './sketch-ui';
 import { IdbStore, MemoryKv, openDatabase } from './idb';
 import { detectLocale, t, tf, type Locale } from './i18n';
 import { Importer, type ImportDocument, type ImportErrorCode } from './import';
+import { blobToBytes, bytesToBlob, unzipProject, zipProject } from './project';
 import type { RasterPage } from './raster';
 import { initTheme, toggleTheme } from './theme';
 import { RasterViewer } from './viewer';
@@ -32,6 +33,7 @@ export function initApp(): () => void {
   const sketchPanel = document.querySelector<HTMLElement>('#sketch-panel')!;
   const maskPanel = document.querySelector<HTMLElement>('#mask-panel')!;
   const fileInput = document.querySelector<HTMLInputElement>('#file-input')!;
+  const projectInput = document.querySelector<HTMLInputElement>('#project-input')!;
   const status = document.querySelector<HTMLElement>('#status')!;
   const coords = document.querySelector<HTMLElement>('#coords')!;
   const zoom = document.querySelector<HTMLElement>('#zoom')!;
@@ -277,6 +279,8 @@ export function initApp(): () => void {
       mask.activate();
     }
   });
+  document.querySelector('#save-project')!.addEventListener('click', () => void saveProject());
+  document.querySelector('#open-project')!.addEventListener('click', () => projectInput.click());
   document.querySelector('#prev-btn')!.addEventListener('click', () => void showPage(pageIndex - 1));
   document.querySelector('#next-btn')!.addEventListener('click', () => void showPage(pageIndex + 1));
   document.querySelector('#pages-toggle')!.addEventListener('click', () => {
@@ -294,6 +298,53 @@ export function initApp(): () => void {
     const file = fileInput.files?.[0];
     if (file) void importFromFile(file);
     fileInput.value = '';
+  });
+
+  const saveProject = async (): Promise<void> => {
+    if (!originalBlob || !doc) {
+      setStatus(t(locale, 'error.failed'), true);
+      return;
+    }
+    try {
+      const raster = await blobToBytes(originalBlob);
+      const zip = zipProject(
+        { version: 1, savedAt: Date.now(), fileName: doc.fileName, kind: doc.kind, pageIndex },
+        raster,
+      );
+      const blob = bytesToBlob(zip, 'application/zip');
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${doc.fileName}.rasterfit.zip`;
+      a.click();
+      URL.revokeObjectURL(url);
+      setStatus(t(locale, 'project.saved'));
+    } catch {
+      setStatus(t(locale, 'error.failed'), true);
+    }
+  };
+
+  const openProject = async (file: File): Promise<void> => {
+    try {
+      const { data, raster } = unzipProject(await blobToBytes(file));
+      const rasterFile = new File([raster as BlobPart], data.fileName);
+      setStatus(t(locale, 'status.importing'));
+      const result = await importer.importFile(rasterFile);
+      if (!result.ok) {
+        setStatus(errorMessage(result.code), true);
+        return;
+      }
+      showDocument(result.doc, result.page, 0, rasterFile);
+      if (data.pageIndex > 0) await showPage(data.pageIndex);
+    } catch {
+      setStatus(t(locale, 'error.failed'), true);
+    }
+  };
+
+  projectInput.addEventListener('change', () => {
+    const file = projectInput.files?.[0];
+    if (file) void openProject(file);
+    projectInput.value = '';
   });
 
   // Drag-and-drop across the whole window.
@@ -389,6 +440,9 @@ function markup(locale: Locale): string {
     <button id="sketch-btn" class="tool-btn" type="button">${t(locale, 'toolbar.sketch')}</button>
     <button id="mask-btn" class="tool-btn" type="button">${t(locale, 'toolbar.mask')}</button>
     <span class="toolbar-spacer"></span>
+    <button id="save-project" class="tool-btn" type="button">${t(locale, 'project.save')}</button>
+    <button id="open-project" class="tool-btn" type="button">${t(locale, 'project.open')}</button>
+    <span class="toolbar-spacer"></span>
     <button id="zoom-out-btn" class="tool-btn" type="button" title="${t(locale, 'viewer.zoomOut')}">−</button>
     <button id="fit-btn" class="tool-btn" type="button" title="${t(locale, 'viewer.fit')}">${t(locale, 'viewer.fit')}</button>
     <button id="zoom-in-btn" class="tool-btn" type="button" title="${t(locale, 'viewer.zoomIn')}">+</button>
@@ -444,5 +498,6 @@ function markup(locale: Locale): string {
 
   <input id="file-input" type="file" hidden
     accept=".pdf,.png,.jpg,.jpeg,.webp,application/pdf,image/png,image/jpeg,image/webp" />
+  <input id="project-input" type="file" hidden accept=".rasterfit.zip,application/zip" />
   `;
 }

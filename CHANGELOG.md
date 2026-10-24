@@ -28,6 +28,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **Fit report**: `rf-core::report` summarizes a fit (RMS, median, 95th
   percentile, rotation/translation) to JSON and CSV, exposed via
   `fit_report_json`/`fit_report_csv` WASM bindings.
+- **Zip project save/open**: `web/src/project.ts` packs `project.json` +
+  `raster` into a `.rasterfit.zip` with fflate; toolbar Save downloads it and
+  Open restores it (Vitest round-trip + e2e).
 
 - **M7** export core (`rf-core::dxf`, `rf-core::svg`): ASCII DXF export of
   `LINE`/`CIRCLE` on `geometry`/`construction` layers (mm) with a round-trip
