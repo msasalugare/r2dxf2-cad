@@ -66,6 +66,10 @@ const sr = {
   'sketch.none': 'Nacrtajte skicu pa kliknite „Reši“',
   'sketch.fit': 'Fit',
   'sketch.fitResult': 'RMS {r} px · rotacija {t}°',
+  'toolbar.mask': 'Maska',
+  'mask.title': 'Maska',
+  'mask.hint': 'Prevucite da crtate masku',
+  'mask.exclude': 'Isključi',
 } as const;
 
 const en: Record<keyof typeof sr, string> = {
@@ -132,6 +136,10 @@ const en: Record<keyof typeof sr, string> = {
   'sketch.none': 'Draw a sketch then click Solve',
   'sketch.fit': 'Fit',
   'sketch.fitResult': 'RMS {r} px · rotation {t}°',
+  'toolbar.mask': 'Mask',
+  'mask.title': 'Mask',
+  'mask.hint': 'Drag to paint a mask',
+  'mask.exclude': 'Exclude',
 };
 
 const messages: Record<Locale, Record<keyof typeof sr, string>> = { sr, en };

@@ -39,6 +39,7 @@ export class RasterViewer {
   private rasterTransform: Affine = IDENTITY;
   private raf = 0;
   private dragPointer: number | null = null;
+  private dragHookActive = false;
   private lastX = 0;
   private lastY = 0;
 
@@ -48,6 +49,8 @@ export class RasterViewer {
   onOverlay: ((ctx: CanvasRenderingContext2D, w: number, h: number) => void) | null = null;
   /** If set and returns true, a pointer press is consumed as a click (no pan). */
   onClick: ((clientX: number, clientY: number) => boolean) | null = null;
+  /** If set and returns true on `start`, the drag is consumed as a tool stroke. */
+  onDrag: ((clientX: number, clientY: number, phase: 'start' | 'move' | 'end') => boolean) | null = null;
 
   constructor(private canvas: HTMLCanvasElement) {
     this.canvas.addEventListener('wheel', this.onWheel, { passive: false });
@@ -94,6 +97,11 @@ export class RasterViewer {
     this.camera = zoomAt(this.camera, this.viewWidth() / 2, this.viewHeight() / 2, factor);
     this.scheduleRender();
     this.onCameraChange?.();
+  }
+
+  /** Request a re-render on the next animation frame. */
+  requestRender(): void {
+    this.scheduleRender();
   }
 
   /** Fit the current page (in world space) into the viewport. */
@@ -206,6 +214,12 @@ export class RasterViewer {
   private onPointerDown = (e: PointerEvent): void => {
     if (e.button !== 0) return;
     if (this.onClick?.(e.clientX, e.clientY)) return;
+    if (this.onDrag?.(e.clientX, e.clientY, 'start')) {
+      this.dragHookActive = true;
+      this.dragPointer = e.pointerId;
+      this.canvas.setPointerCapture(e.pointerId);
+      return;
+    }
     this.dragPointer = e.pointerId;
     this.lastX = e.clientX;
     this.lastY = e.clientY;
@@ -214,6 +228,10 @@ export class RasterViewer {
 
   private onPointerMove = (e: PointerEvent): void => {
     if (this.dragPointer !== e.pointerId) return;
+    if (this.dragHookActive) {
+      this.onDrag?.(e.clientX, e.clientY, 'move');
+      return;
+    }
     const dx = e.clientX - this.lastX;
     const dy = e.clientY - this.lastY;
     this.lastX = e.clientX;
@@ -225,6 +243,10 @@ export class RasterViewer {
 
   private onPointerUp = (e: PointerEvent): void => {
     if (this.dragPointer !== e.pointerId) return;
+    if (this.dragHookActive) {
+      this.onDrag?.(e.clientX, e.clientY, 'end');
+      this.dragHookActive = false;
+    }
     this.dragPointer = null;
     try {
       this.canvas.releasePointerCapture(e.pointerId);

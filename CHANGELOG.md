@@ -20,6 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **Fit UI** wired to the WASM fitter: the raster worker now exposes the gray8
   buffer, and the sketch panel's Fit runs `detect_ridges` → `fit_sketch` and
   shows the RMS/rotation result, with an e2e test.
+- **Mask overlay UI**: a brush tool with include/exclude modes and a
+  semi-transparent overlay, with an e2e test.
 
 - **M7** export core (`rf-core::dxf`, `rf-core::svg`): ASCII DXF export of
   `LINE`/`CIRCLE` on `geometry`/`construction` layers (mm) with a round-trip

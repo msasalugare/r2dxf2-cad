@@ -3,6 +3,7 @@
 
 import { Autosave, type AutosaveMeta } from './autosave';
 import { CalibrationController } from './calibration-ui';
+import { MaskController } from './mask-ui';
 import { SketchController } from './sketch-ui';
 import { IdbStore, MemoryKv, openDatabase } from './idb';
 import { detectLocale, t, tf, type Locale } from './i18n';
@@ -29,6 +30,7 @@ export function initApp(): () => void {
   const autosavePrompt = document.querySelector<HTMLElement>('#autosave-prompt')!;
   const calibrationPanel = document.querySelector<HTMLElement>('#calibration-panel')!;
   const sketchPanel = document.querySelector<HTMLElement>('#sketch-panel')!;
+  const maskPanel = document.querySelector<HTMLElement>('#mask-panel')!;
   const fileInput = document.querySelector<HTMLInputElement>('#file-input')!;
   const status = document.querySelector<HTMLElement>('#status')!;
   const coords = document.querySelector<HTMLElement>('#coords')!;
@@ -66,6 +68,8 @@ export function initApp(): () => void {
     }
   });
 
+  const mask = new MaskController(viewer, maskPanel, locale, setStatus);
+
   const refreshZoom = (): void => {
     zoom.textContent = tf(locale, 'status.zoom', {
       z: Math.round(viewer.getCamera().zoom * 100),
@@ -76,10 +80,15 @@ export function initApp(): () => void {
   viewer.onOverlay = (ctx) => {
     calibration.drawOverlay(ctx);
     sketch.drawOverlay(ctx);
+    mask.drawOverlay(ctx);
   };
   viewer.onClick = (clientX, clientY) => {
     if (calibration.isActive()) return calibration.handleClick(clientX, clientY);
     if (sketch.isActive()) return sketch.handleClick(clientX, clientY);
+    return false;
+  };
+  viewer.onDrag = (clientX, clientY, phase) => {
+    if (mask.isActive()) return mask.handleDrag(clientX, clientY, phase);
     return false;
   };
 
@@ -128,6 +137,7 @@ export function initApp(): () => void {
     pageNav.hidden = nextDoc.pageCount <= 1;
     calibration.deactivate();
     sketch.deactivate();
+    mask.deactivate();
     renderPagesList(nextDoc.pageCount, index);
     document.documentElement.dataset.raster = 'loaded';
     document.documentElement.dataset.pageCount = String(nextDoc.pageCount);
@@ -240,6 +250,14 @@ export function initApp(): () => void {
     if (sketch.isActive()) sketch.deactivate();
     else sketch.activate();
   });
+  document.querySelector('#mask-btn')!.addEventListener('click', () => {
+    if (!activePage) {
+      setStatus(t(locale, 'mask.hint'), true);
+      return;
+    }
+    if (mask.isActive()) mask.deactivate();
+    else mask.activate();
+  });
   document.querySelector('#prev-btn')!.addEventListener('click', () => void showPage(pageIndex - 1));
   document.querySelector('#next-btn')!.addEventListener('click', () => void showPage(pageIndex + 1));
   document.querySelector('#pages-toggle')!.addEventListener('click', () => {
@@ -350,6 +368,7 @@ function markup(locale: Locale): string {
     <span class="toolbar-spacer"></span>
     <button id="calibrate-btn" class="tool-btn" type="button">${t(locale, 'toolbar.calibrate')}</button>
     <button id="sketch-btn" class="tool-btn" type="button">${t(locale, 'toolbar.sketch')}</button>
+    <button id="mask-btn" class="tool-btn" type="button">${t(locale, 'toolbar.mask')}</button>
     <span class="toolbar-spacer"></span>
     <button id="zoom-out-btn" class="tool-btn" type="button" title="${t(locale, 'viewer.zoomOut')}">−</button>
     <button id="fit-btn" class="tool-btn" type="button" title="${t(locale, 'viewer.fit')}">${t(locale, 'viewer.fit')}</button>
@@ -370,6 +389,8 @@ function markup(locale: Locale): string {
   <aside class="panel panel-wide" id="calibration-panel" aria-label="${t(locale, 'calibrate.title')}" hidden></aside>
 
   <aside class="panel panel-wide" id="sketch-panel" aria-label="${t(locale, 'sketch.title')}" hidden></aside>
+
+  <aside class="panel panel-wide" id="mask-panel" aria-label="${t(locale, 'mask.title')}" hidden></aside>
 
   <div class="autosave-prompt" id="autosave-prompt" role="alertdialog" aria-labelledby="autosave-text" hidden>
     <p id="autosave-text">${t(locale, 'autosave.prompt')}</p>
