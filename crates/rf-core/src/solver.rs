@@ -1086,4 +1086,45 @@ mod tests {
             vec![true, true, true, true, false, false]
         );
     }
+
+    #[test]
+    fn tangent_line_arc_with_pinned_joint_swings_free_end() {
+        // Joining a line to an arc tangentially. The shared endpoint (the joint)
+        // is pinned so the solver swings only the free end of the line, instead
+        // of sliding the joint along the supporting circle (which the UI prevents
+        // by pinning the joint when a tangent continuation is drawn).
+        let s = Sketch {
+            points: vec![p(1, 0.0, 0.0), p(2, 10.0, 0.0), p(3, 20.0, 5.0)],
+            lines: vec![line(10, 2, 3)],
+            arcs: vec![arc(30, 1, 10.0, -0.6, 0.0)],
+            constraints: vec![
+                Constraint::FixedPoint(PointId::new(1), 0.0, 0.0),
+                Constraint::ArcRadius(ArcId::new(30), 10.0),
+                Constraint::PointOnArc(PointId::new(2), ArcId::new(30)),
+                Constraint::FixedPoint(PointId::new(2), 10.0, 0.0), // pinned joint
+                Constraint::TangentLineArc(LineId::new(10), ArcId::new(30)),
+            ],
+            ..Default::default()
+        };
+        let res = solve(&s);
+        assert!(res.converged, "max residual {}", res.max_residual);
+        // Joint stays put.
+        assert!(
+            (res.params[2] - 10.0).abs() < 1e-6,
+            "joint x drifted: {}",
+            res.params[2]
+        );
+        assert!(
+            res.params[3].abs() < 1e-6,
+            "joint y drifted: {}",
+            res.params[3]
+        );
+        // Free end swings to the tangent line (vertical x = 10 through the joint).
+        // Loose tolerance: the solver leaves a tiny angular drift at convergence.
+        assert!(
+            (res.params[4] - 10.0).abs() < 1e-3,
+            "free end x drifted: {}",
+            res.params[4]
+        );
+    }
 }

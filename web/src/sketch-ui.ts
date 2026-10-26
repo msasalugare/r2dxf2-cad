@@ -1847,6 +1847,16 @@ export class SketchController {
         this.pushUndo();
         const a = prevPt ?? this.getOrCreatePoint(startX, startY, altKey);
         const b = this.getOrCreatePoint(rawR.x, rawR.y, altKey);
+        // Pin the shared joint on every directional continuation (tangent,
+        // perpendicular, tangent-arc, free-arc) so the solve swings the new
+        // segment into place instead of sliding the joint along the previous
+        // entity. Plain `line` mode adds no directional constraint and keeps its
+        // vertices draggable, so it is left alone.
+        const isContinuation =
+          this.pending.lastLineId !== undefined || this.pending.lastArcId !== undefined;
+        if (isContinuation && this.polyMode !== 'line') {
+          this.setPointFixedToRaster(a.id, a.x, a.y);
+        }
         let newLineId: number | undefined;
         let newArcId: number | undefined;
         if (a.id !== b.id) {
