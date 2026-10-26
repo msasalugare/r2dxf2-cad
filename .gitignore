@@ -12,8 +12,16 @@ web/public/wasm/
 
 # Playwright
 web/test-results/
+test-results/
 web/playwright-report/
+playwright-report/
 web/.playwright/
+
+# Python (native backend)
+.venv/
+__pycache__/
+*.py[cod]
+data/
 
 # Misc
 .DS_Store

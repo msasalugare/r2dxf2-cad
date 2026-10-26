@@ -1,6 +1,12 @@
 //! Constraint solver: Gauss–Newton/LM over sketch parameters, with an exact
 //! Jacobian from forward-mode dual-number autodiff.
 //!
+//! For systems up to [`CG_PARAM_THRESHOLD`] (1500) parameters, the solver uses
+//! dense Cholesky factorization of the damped normal equations `(JᵀJ + μI)δ = −Jᵀr`;
+//! above that threshold it switches to Conjugate Gradient (CG) over the normal
+//! equations without forming `JᵀJ` explicitly. After LM convergence, a final
+//! minimum-norm Newton projection drives `‖c(q)‖∞ < 1e-9 mm`.
+//!
 //! The solver also reports rank / degrees of freedom and flags redundant and
 //! conflicting constraints (T13). See `docs/ALGORITHM.md` §9–10.
 #![allow(clippy::suspicious_arithmetic_impl)]
@@ -11,6 +17,10 @@ use nalgebra::{DMatrix, DVector};
 use serde::{Deserialize, Serialize};
 
 use crate::sketch::{Constraint, Sketch};
+
+/// Parameter count threshold above which Conjugate Gradient is used instead of
+/// dense Cholesky factorization (`Prompt.txt` §10).
+pub const CG_PARAM_THRESHOLD: usize = 1500;
 
 /// A dual number carrying a value and a full gradient w.r.t. the parameter
 /// vector. Used to evaluate constraint residuals and their exact Jacobian.
@@ -134,18 +144,21 @@ impl Neg for Dual {
 }
 
 pub(crate) fn hypot(a: Dual, b: Dual) -> Dual {
-    let v = a.v.hypot(b.v);
+    let v = a.v.hypot(b.v).max(1e-15);
     let g =
         a.g.iter()
             .zip(b.g.iter())
             .map(|(ga, gb)| (a.v * ga + b.v * gb) / v)
             .collect();
-    Dual { v, g }
+    Dual {
+        v: a.v.hypot(b.v),
+        g,
+    }
 }
 
 pub(crate) fn atan2(y: Dual, x: Dual) -> Dual {
     let v = y.v.atan2(x.v);
-    let denom = x.v * x.v + y.v * y.v;
+    let denom = (x.v * x.v + y.v * y.v).max(1e-30);
     let g =
         y.g.iter()
             .zip(x.g.iter())
@@ -171,6 +184,9 @@ pub struct SolveResult {
     pub redundant: Vec<usize>,
     /// Constraint indices that are in conflict (residual not driven to zero).
     pub conflicting: Vec<usize>,
+    /// Per-parameter lock status (`true` = locked by constraints, `false` = free DoF).
+    #[serde(default)]
+    pub constrained_params: Vec<bool>,
 }
 
 /// Solve a sketch's constraints, starting from the current geometry.
@@ -185,9 +201,6 @@ pub fn solve_from(sketch: &Sketch, initial: &[f64]) -> SolveResult {
 
     let (rows_per_constraint, _residuals, mut jacobian) = evaluate(sketch, &params);
     let m = jacobian.len() / n.max(1);
-
-    // Rank / DoF / redundancy from the initial Jacobian.
-    let (rank, redundant) = analyze_rank(&jacobian, m, n);
 
     // Gauss–Newton with a small Levenberg damping, tightened on acceptance.
     let mut mu = 1e-6;
@@ -210,16 +223,25 @@ pub fn solve_from(sketch: &Sketch, initial: &[f64]) -> SolveResult {
         }
 
         let j = to_matrix(&jacobian, m, n);
-        let jt = j.transpose();
-        let g = &jt * DVector::from_vec(res.clone());
-        let mut h = &jt * &j;
-        for i in 0..n {
-            h[(i, i)] += mu;
-        }
+        let delta = if n > CG_PARAM_THRESHOLD {
+            Some(solve_normal_cg(
+                &j,
+                &DVector::from_vec(res.clone()),
+                mu,
+                200,
+            ))
+        } else {
+            let jt = j.transpose();
+            let g = &jt * DVector::from_vec(res.clone());
+            let mut h = &jt * &j;
+            for i in 0..n {
+                h[(i, i)] += mu;
+            }
+            h.cholesky().map(|chol| chol.solve(&(-g)))
+        };
 
-        let delta = match h.clone().cholesky() {
-            Some(chol) => chol.solve(&(-g)),
-            None => break,
+        let Some(delta) = delta else {
+            break;
         };
 
         let candidate: Vec<f64> = params
@@ -243,13 +265,27 @@ pub fn solve_from(sketch: &Sketch, initial: &[f64]) -> SolveResult {
         iterations += 1;
     }
 
+    // Final Newton projection onto c(q) = 0 to guarantee ‖c‖∞ < 1e-9 mm.
+    project_onto_constraints(sketch, &mut params, 10);
+
+    let (_rows, final_res, final_jac) = evaluate(sketch, &params);
+    residuals = final_res;
     let max_residual = residuals.iter().fold(0.0_f64, |a, &b| a.max(b.abs()));
+    if max_residual < 1e-9 {
+        converged = true;
+    }
+
+    // Recompute rank/redundancy and per-parameter lock status at the converged state.
+    let (rank, redundant) = analyze_rank(&final_jac, m, n, &rows_per_constraint);
+    let constrained_params = analyze_constrained_params(&final_jac, m, n);
 
     // Conflicting constraints: those whose residuals were not driven to zero.
     let conflicting: Vec<usize> = rows_per_constraint
         .iter()
         .enumerate()
-        .filter(|(_, &(start, end))| residuals[start..end].iter().any(|&r| r.abs() > 1e-6))
+        .filter(|(_, &(start, end))| {
+            start < end && residuals[start..end].iter().any(|&r| r.abs() > 1e-6)
+        })
         .map(|(i, _)| i)
         .collect();
 
@@ -263,13 +299,89 @@ pub fn solve_from(sketch: &Sketch, initial: &[f64]) -> SolveResult {
         dof: n.saturating_sub(rank),
         redundant,
         conflicting,
+        constrained_params,
     }
 }
 
-/// Evaluate all constraint residuals and their Jacobian.
+/// Minimum-norm Newton projection `δ = −J⁺ c(q)` so `‖c(q)‖∞ < 1e-9 mm`.
+pub fn project_onto_constraints(sketch: &Sketch, params: &mut [f64], max_steps: usize) {
+    let n = sketch.parameter_count();
+    if n == 0 {
+        return;
+    }
+    for _ in 0..max_steps {
+        let (_rows, res, jac) = evaluate(sketch, params);
+        let m = res.len();
+        if m == 0 {
+            return;
+        }
+        let max_res = res.iter().fold(0.0_f64, |a, &b| a.max(b.abs()));
+        if !(1e-12..=1e-2).contains(&max_res) {
+            // Either already < 1e-12, or far from manifold (conflicting).
+            return;
+        }
+        let j = to_matrix(&jac, m, n);
+        let svd = j.svd(true, true);
+        let Ok(delta) = svd.solve(&(-DVector::from_vec(res.clone())), 1e-10) else {
+            return;
+        };
+        let candidate: Vec<f64> = params
+            .iter()
+            .zip(delta.iter())
+            .map(|(p, d)| p + d)
+            .collect();
+        let (_, cand_res, _) = evaluate(sketch, &candidate);
+        let cand_max = cand_res.iter().fold(0.0_f64, |a, &b| a.max(b.abs()));
+        if cand_max < max_res {
+            params.copy_from_slice(&candidate);
+        } else {
+            break;
+        }
+    }
+}
+
+/// Conjugate Gradient solver for `(JᵀJ + μI) δ = −Jᵀ r`.
+pub fn solve_normal_cg(
+    j: &DMatrix<f64>,
+    r: &DVector<f64>,
+    mu: f64,
+    max_iter: usize,
+) -> DVector<f64> {
+    let n = j.ncols();
+    let mut x = DVector::<f64>::zeros(n);
+    // b = -Jᵀ r
+    let b = -(j.transpose() * r);
+    let mut res = b.clone();
+    let mut p = res.clone();
+    let mut rs_old = res.dot(&res);
+    if rs_old.sqrt() < 1e-15 {
+        return x;
+    }
+    for _ in 0..max_iter.min(n * 2) {
+        let jp = j * &p;
+        let ap = j.transpose() * jp + &p * mu;
+        let p_ap = p.dot(&ap);
+        if p_ap.abs() < 1e-30 {
+            break;
+        }
+        let alpha = rs_old / p_ap;
+        x += &p * alpha;
+        res -= &ap * alpha;
+        let rs_new = res.dot(&res);
+        if rs_new.sqrt() < 1e-12 {
+            break;
+        }
+        p = &res + &p * (rs_new / rs_old);
+        rs_old = rs_new;
+    }
+    x
+}
+
+/// Evaluate all driving constraint residuals and their Jacobian.
 ///
 /// Returns per-constraint row ranges, the residual vector, and a row-major
-/// `m × n` Jacobian.
+/// `m × n` Jacobian. Reference constraints produce an empty `(start, start)`
+/// range so indices in `rows` still align 1-to-1 with `sketch.constraints`.
 fn evaluate(sketch: &Sketch, params: &[f64]) -> (Vec<(usize, usize)>, Vec<f64>, Vec<f64>) {
     let n = sketch.parameter_count();
     let dual_params: Vec<Dual> = params
@@ -282,11 +394,13 @@ fn evaluate(sketch: &Sketch, params: &[f64]) -> (Vec<(usize, usize)>, Vec<f64>, 
     let mut residuals = Vec::new();
     let mut jacobian = Vec::new();
 
-    for constraint in &sketch.constraints {
+    for (idx, constraint) in sketch.constraints.iter().enumerate() {
         let start = residuals.len();
-        for r in residual_vec(sketch, &dual_params, constraint) {
-            residuals.push(r.v);
-            jacobian.extend_from_slice(&r.g);
+        if !sketch.is_reference_constraint(idx) {
+            for r in residual_vec(sketch, &dual_params, constraint) {
+                residuals.push(r.v);
+                jacobian.extend_from_slice(&r.g);
+            }
         }
         rows.push((start, residuals.len()));
     }
@@ -297,6 +411,7 @@ fn evaluate(sketch: &Sketch, params: &[f64]) -> (Vec<(usize, usize)>, Vec<f64>, 
 /// Residuals for a single constraint (as dual numbers).
 pub(crate) fn residual_vec(sketch: &Sketch, p: &[Dual], c: &Constraint) -> Vec<Dual> {
     let n_points = sketch.points.len();
+    let n_circles = sketch.circles.len();
     // Gradient length may exceed the slice length when the caller also carries
     // transform parameters (the fitter); use the dual gradient length.
     let grad_n = p.first().map(|d| d.g.len()).unwrap_or(0);
@@ -304,7 +419,7 @@ pub(crate) fn residual_vec(sketch: &Sketch, p: &[Dual], c: &Constraint) -> Vec<D
         let i = sketch.point_index(id).expect("point exists");
         (p[2 * i].clone(), p[2 * i + 1].clone())
     };
-    let line_dir = |id| {
+    let line_endpoints = |id| {
         let line = sketch
             .lines
             .iter()
@@ -312,11 +427,19 @@ pub(crate) fn residual_vec(sketch: &Sketch, p: &[Dual], c: &Constraint) -> Vec<D
             .expect("line exists");
         let (ax, ay) = point(line.a);
         let (bx, by) = point(line.b);
+        (ax, ay, bx, by)
+    };
+    let line_dir = |id| {
+        let (ax, ay, bx, by) = line_endpoints(id);
         (bx - ax, by - ay)
     };
     let radius = |id| {
         let j = sketch.circle_index(id).expect("circle exists");
         p[2 * n_points + j].clone()
+    };
+    let arc_radius = |id| {
+        let k = sketch.arc_index(id).expect("arc exists");
+        p[2 * n_points + n_circles + 3 * k].clone()
     };
 
     match *c {
@@ -350,13 +473,8 @@ pub(crate) fn residual_vec(sketch: &Sketch, p: &[Dual], c: &Constraint) -> Vec<D
         }
         Constraint::EqualRadius(a, b) => vec![radius(a) - radius(b)],
         Constraint::TangentLineCircle(l, circle) => {
-            let (dx, dy) = line_dir(l);
-            let line_a = sketch
-                .lines
-                .iter()
-                .find(|x| x.id == l)
-                .expect("line exists");
-            let (ax, ay) = point(line_a.a);
+            let (ax, ay, bx, by) = line_endpoints(l);
+            let (dx, dy) = (bx - ax.clone(), by - ay.clone());
             let (cx, cy) = {
                 let circ = sketch
                     .circles
@@ -369,10 +487,92 @@ pub(crate) fn residual_vec(sketch: &Sketch, p: &[Dual], c: &Constraint) -> Vec<D
             let dist = cross.abs() / hypot(dx, dy);
             vec![dist - radius(circle)]
         }
+        Constraint::TangentLineArc(l, arc) => {
+            // Distance from the arc center to the line equals the radius:
+            // the line is tangent to the arc's supporting circle.
+            let (ax, ay, bx, by) = line_endpoints(l);
+            let (dx, dy) = (bx - ax.clone(), by - ay.clone());
+            let (cx, cy) = {
+                let a = sketch
+                    .arcs
+                    .iter()
+                    .find(|x| x.id == arc)
+                    .expect("arc exists");
+                point(a.center)
+            };
+            let cross = dx.clone() * (cy - ay) - dy.clone() * (cx - ax);
+            let dist = cross.abs() / hypot(dx, dy);
+            vec![dist - arc_radius(arc)]
+        }
+        Constraint::TangentCircleCircle(c1, c2) => {
+            let circ1 = sketch
+                .circles
+                .iter()
+                .find(|x| x.id == c1)
+                .expect("circle 1 exists");
+            let circ2 = sketch
+                .circles
+                .iter()
+                .find(|x| x.id == c2)
+                .expect("circle 2 exists");
+            let (x1, y1) = point(circ1.center);
+            let (x2, y2) = point(circ2.center);
+            let center_dist = hypot(x2 - x1, y2 - y1);
+            vec![center_dist - (radius(c1) + radius(c2))]
+        }
+        Constraint::Symmetric(p1, p2, l) => {
+            let (x1, y1) = point(p1);
+            let (x2, y2) = point(p2);
+            let (ax, ay, bx, by) = line_endpoints(l);
+            let (dx, dy) = (bx - ax.clone(), by - ay.clone());
+            let len = hypot(dx.clone(), dy.clone());
+            let half = Dual::constant(0.5, grad_n);
+            let mx = (x1.clone() + x2.clone()) * half.clone();
+            let my = (y1.clone() + y2.clone()) * half;
+            // 1) Midpoint lies on line l (signed perpendicular distance = 0)
+            let mid_on_line = (dx.clone() * (my - ay) - dy.clone() * (mx - ax)) / len.clone();
+            // 2) Segment p1→p2 is perpendicular to line l
+            let perp = (dx * (x2 - x1) + dy * (y2 - y1)) / len;
+            vec![mid_on_line, perp]
+        }
+        Constraint::Midpoint(pt, l) => {
+            let (px, py) = point(pt);
+            let (ax, ay, bx, by) = line_endpoints(l);
+            let half = Dual::constant(0.5, grad_n);
+            vec![px - (ax + bx) * half.clone(), py - (ay + by) * half]
+        }
+        Constraint::Collinear(l1, l2) => {
+            let (ax, ay, bx, by) = line_endpoints(l1);
+            let (dx, dy) = (bx - ax.clone(), by - ay.clone());
+            let len = hypot(dx.clone(), dy.clone());
+            let (cx, cy, ex, ey) = line_endpoints(l2);
+            let r1 =
+                (dx.clone() * (cy - ay.clone()) - dy.clone() * (cx - ax.clone())) / len.clone();
+            let r2 = (dx * (ey - ay) - dy * (ex - ax)) / len;
+            vec![r1, r2]
+        }
         Constraint::Distance(a, b, d) => {
             let (ax, ay) = point(a);
             let (bx, by) = point(b);
             vec![hypot(bx - ax, by - ay) - Dual::constant(d, grad_n)]
+        }
+        Constraint::DistancePointLine(pt, l, d) => {
+            let (px, py) = point(pt);
+            let (ax, ay, bx, by) = line_endpoints(l);
+            let (dx, dy) = (bx - ax.clone(), by - ay.clone());
+            let cross = dx.clone() * (py - ay) - dy.clone() * (px - ax);
+            let dist = cross.abs() / hypot(dx, dy);
+            vec![dist - Dual::constant(d, grad_n)]
+        }
+        Constraint::HorizontalDistance(a, b, d) => {
+            let (ax, _) = point(a);
+            let (bx, _) = point(b);
+            vec![(bx - ax).abs() - Dual::constant(d, grad_n)]
+        }
+        Constraint::VerticalDistance(a, b, d) => {
+            let (_, ay) = point(a);
+            let (_, by) = point(b);
+            vec![(by - ay).abs() - Dual::constant(d, grad_n)]
         }
         Constraint::Angle(a, b, target) => {
             let (ax, ay) = line_dir(a);
@@ -382,6 +582,10 @@ pub(crate) fn residual_vec(sketch: &Sketch, p: &[Dual], c: &Constraint) -> Vec<D
             vec![atan2(cross, dot) - Dual::constant(target, grad_n)]
         }
         Constraint::Radius(circle, r) => vec![radius(circle) - Dual::constant(r, grad_n)],
+        Constraint::Diameter(circle, d) => {
+            vec![radius(circle) * Dual::constant(2.0, grad_n) - Dual::constant(d, grad_n)]
+        }
+        Constraint::ArcRadius(arc, r) => vec![arc_radius(arc) - Dual::constant(r, grad_n)],
         Constraint::FixedPoint(p_, x, y) => {
             let (px, py) = point(p_);
             vec![
@@ -390,13 +594,8 @@ pub(crate) fn residual_vec(sketch: &Sketch, p: &[Dual], c: &Constraint) -> Vec<D
             ]
         }
         Constraint::PointOnLine(p_, l) => {
-            let (dx, dy) = line_dir(l);
-            let line = sketch
-                .lines
-                .iter()
-                .find(|x| x.id == l)
-                .expect("line exists");
-            let (ax, ay) = point(line.a);
+            let (ax, ay, bx, by) = line_endpoints(l);
+            let (dx, dy) = (bx - ax.clone(), by - ay.clone());
             let (px, py) = point(p_);
             let cross = dx.clone() * (py - ay) - dy.clone() * (px - ax);
             vec![cross.abs() / hypot(dx, dy)]
@@ -411,11 +610,95 @@ pub(crate) fn residual_vec(sketch: &Sketch, p: &[Dual], c: &Constraint) -> Vec<D
             let (px, py) = point(p_);
             vec![hypot(px - cx, py - cy) - radius(circle)]
         }
+        Constraint::PointOnArc(p_, arc) => {
+            let a = sketch
+                .arcs
+                .iter()
+                .find(|x| x.id == arc)
+                .expect("arc exists");
+            let (cx, cy) = point(a.center);
+            let (px, py) = point(p_);
+            vec![hypot(px - cx, py - cy) - arc_radius(arc)]
+        }
+        Constraint::HorizontalPoints(a, b) => {
+            let (_, ay) = point(a);
+            let (_, by) = point(b);
+            vec![by - ay]
+        }
+        Constraint::VerticalPoints(a, b) => {
+            let (ax, _) = point(a);
+            let (bx, _) = point(b);
+            vec![bx - ax]
+        }
+        Constraint::LineLength(l, d) => {
+            let (dx, dy) = line_dir(l);
+            vec![hypot(dx, dy) - Dual::constant(d, grad_n)]
+        }
+        Constraint::AngleLine(l, target) => {
+            let (dx, dy) = line_dir(l);
+            vec![atan2(dy, dx) - Dual::constant(target, grad_n)]
+        }
+        Constraint::SymmetricPoints(p1, p2, mid) => {
+            let (x1, y1) = point(p1);
+            let (x2, y2) = point(p2);
+            let (mx, my) = point(mid);
+            let half = Dual::constant(0.5, grad_n);
+            vec![mx - (x1 + x2) * half.clone(), my - (y1 + y2) * half]
+        }
+        Constraint::TangentArcArc(a1, a2) => {
+            // External tangency of the two supporting circles:
+            // center distance equals the sum of the two radii.
+            let arc1 = sketch
+                .arcs
+                .iter()
+                .find(|x| x.id == a1)
+                .expect("arc 1 exists");
+            let arc2 = sketch
+                .arcs
+                .iter()
+                .find(|x| x.id == a2)
+                .expect("arc 2 exists");
+            let (x1, y1) = point(arc1.center);
+            let (x2, y2) = point(arc2.center);
+            let center_dist = hypot(x2 - x1, y2 - y1);
+            vec![center_dist - (arc_radius(a1) + arc_radius(a2))]
+        }
+        Constraint::PerpendicularLineCircle(l, circle) => {
+            let (ax, ay, bx, by) = line_endpoints(l);
+            let (dx, dy) = (bx - ax.clone(), by - ay.clone());
+            let circ = sketch
+                .circles
+                .iter()
+                .find(|x| x.id == circle)
+                .expect("circle exists");
+            let (cx, cy) = point(circ.center);
+            let cross = dx.clone() * (cy - ay) - dy.clone() * (cx - ax);
+            vec![cross / hypot(dx, dy)]
+        }
+        Constraint::PerpendicularLineArc(l, arc) => {
+            let (ax, ay, bx, by) = line_endpoints(l);
+            let (dx, dy) = (bx - ax.clone(), by - ay.clone());
+            let a = sketch
+                .arcs
+                .iter()
+                .find(|x| x.id == arc)
+                .expect("arc exists");
+            let (cx, cy) = point(a.center);
+            let cross = dx.clone() * (cy - ay) - dy.clone() * (cx - ax);
+            vec![cross / hypot(dx, dy)]
+        }
+        Constraint::EqualRadiusArc(a, b) => vec![arc_radius(a) - arc_radius(b)],
+        Constraint::EqualRadiusCircleArc(c, a) => vec![radius(c) - arc_radius(a)],
     }
 }
 
 /// Rank and redundant-constraint analysis of a row-major `m × n` Jacobian.
-fn analyze_rank(jacobian: &[f64], m: usize, n: usize) -> (usize, Vec<usize>) {
+fn analyze_rank(
+    jacobian: &[f64],
+    m: usize,
+    n: usize,
+    rows_per_constraint: &[(usize, usize)],
+) -> (usize, Vec<usize>) {
     if m == 0 || n == 0 {
         return (0, Vec::new());
     }
@@ -423,11 +706,15 @@ fn analyze_rank(jacobian: &[f64], m: usize, n: usize) -> (usize, Vec<usize>) {
     let rank = matrix_rank(&j);
 
     let mut redundant = Vec::new();
-    for i in 0..m {
-        let mut sub = DMatrix::<f64>::zeros(m - 1, n);
+    for (c_idx, &(start, end)) in rows_per_constraint.iter().enumerate() {
+        if start >= end {
+            continue;
+        }
+        let drop_rows = end - start;
+        let mut sub = DMatrix::<f64>::zeros(m - drop_rows, n);
         let mut r = 0;
         for (k, row) in j.row_iter().enumerate() {
-            if k == i {
+            if k >= start && k < end {
                 continue;
             }
             for (c, &v) in row.iter().enumerate() {
@@ -436,14 +723,46 @@ fn analyze_rank(jacobian: &[f64], m: usize, n: usize) -> (usize, Vec<usize>) {
             r += 1;
         }
         if matrix_rank(&sub) == rank {
-            redundant.push(i);
+            redundant.push(c_idx);
         }
     }
     (rank, redundant)
 }
 
+/// Determine which scalar parameters `0..n` are fully locked by the constraint
+/// Jacobian (i.e. have zero projection onto the Jacobian's null-space).
+fn analyze_constrained_params(jacobian: &[f64], m: usize, n: usize) -> Vec<bool> {
+    if n == 0 {
+        return Vec::new();
+    }
+    if m == 0 {
+        return vec![false; n];
+    }
+    let j = to_matrix(jacobian, m, n);
+    let svd = j.svd(false, true);
+    let Some(v_t) = svd.v_t else {
+        return vec![false; n];
+    };
+    let tol = 1e-9;
+    let mut locked = vec![false; n];
+    for p in 0..n {
+        let mut row_space_proj_sq = 0.0;
+        for (k, &sigma) in svd.singular_values.iter().enumerate() {
+            if sigma > tol && k < v_t.nrows() {
+                let v = v_t[(k, p)];
+                row_space_proj_sq += v * v;
+            }
+        }
+        locked[p] = row_space_proj_sq > 1.0 - 1e-4;
+    }
+    locked
+}
+
 fn matrix_rank(m: &DMatrix<f64>) -> usize {
-    let svd = m.clone().svd(true, true);
+    if m.nrows() == 0 || m.ncols() == 0 {
+        return 0;
+    }
+    let svd = m.clone().svd(false, false);
     let tol = 1e-9;
     svd.singular_values.iter().filter(|&&s| s > tol).count()
 }
@@ -455,7 +774,9 @@ fn to_matrix(jacobian: &[f64], m: usize, n: usize) -> DMatrix<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sketch::{CircleId, LineId, PointId, SketchCircle, SketchLine, SketchPoint};
+    use crate::sketch::{
+        ArcId, CircleId, LineId, PointId, SketchArc, SketchCircle, SketchLine, SketchPoint,
+    };
 
     fn p(id: u32, x: f64, y: f64) -> SketchPoint {
         SketchPoint {
@@ -479,6 +800,17 @@ mod tests {
             id: CircleId::new(id),
             center: PointId::new(center),
             radius,
+            construction: false,
+        }
+    }
+
+    fn arc(id: u32, center: u32, radius: f64, start: f64, end: f64) -> SketchArc {
+        SketchArc {
+            id: ArcId::new(id),
+            center: PointId::new(center),
+            radius,
+            start,
+            end,
             construction: false,
         }
     }
@@ -512,7 +844,7 @@ mod tests {
 
     #[test]
     fn jacobian_matches_finite_differences() {
-        // One sketch exercising every constraint type.
+        // One sketch exercising every constraint type (including v1 additions).
         let s = Sketch {
             points: vec![
                 p(1, 0.0, 0.0),
@@ -523,6 +855,7 @@ mod tests {
             ],
             lines: vec![line(10, 1, 2), line(11, 3, 4), line(12, 1, 3)],
             circles: vec![circle(20, 3, 3.0), circle(21, 4, 2.0)],
+            arcs: vec![arc(30, 3, 4.0, 0.1, 1.2), arc(31, 4, 2.5, 0.2, 1.5)],
             constraints: vec![
                 Constraint::Coincident(PointId::new(1), PointId::new(2)),
                 Constraint::Horizontal(LineId::new(10)),
@@ -532,15 +865,82 @@ mod tests {
                 Constraint::EqualLength(LineId::new(10), LineId::new(11)),
                 Constraint::EqualRadius(CircleId::new(20), CircleId::new(21)),
                 Constraint::TangentLineCircle(LineId::new(10), CircleId::new(20)),
+                Constraint::TangentLineArc(LineId::new(10), ArcId::new(30)),
+                Constraint::TangentCircleCircle(CircleId::new(20), CircleId::new(21)),
+                Constraint::Symmetric(PointId::new(4), PointId::new(5), LineId::new(10)),
+                Constraint::Midpoint(PointId::new(3), LineId::new(10)),
+                Constraint::Collinear(LineId::new(10), LineId::new(11)),
                 Constraint::Distance(PointId::new(3), PointId::new(4), 7.0),
+                Constraint::DistancePointLine(PointId::new(5), LineId::new(10), 4.0),
+                Constraint::HorizontalDistance(PointId::new(1), PointId::new(2), 9.0),
+                Constraint::VerticalDistance(PointId::new(1), PointId::new(3), 7.5),
                 Constraint::Angle(LineId::new(10), LineId::new(12), 0.4),
                 Constraint::Radius(CircleId::new(20), 3.0),
+                Constraint::Diameter(CircleId::new(21), 5.0),
+                Constraint::ArcRadius(ArcId::new(30), 4.5),
                 Constraint::FixedPoint(PointId::new(5), 9.0, 9.0),
                 Constraint::PointOnLine(PointId::new(5), LineId::new(10)),
                 Constraint::PointOnCircle(PointId::new(5), CircleId::new(20)),
+                Constraint::PointOnArc(PointId::new(5), ArcId::new(30)),
+                Constraint::HorizontalPoints(PointId::new(1), PointId::new(2)),
+                Constraint::VerticalPoints(PointId::new(3), PointId::new(4)),
+                Constraint::LineLength(LineId::new(10), 10.0),
+                Constraint::AngleLine(LineId::new(10), 0.2),
+                Constraint::SymmetricPoints(PointId::new(1), PointId::new(2), PointId::new(3)),
+                Constraint::TangentArcArc(ArcId::new(30), ArcId::new(31)),
+                Constraint::PerpendicularLineCircle(LineId::new(10), CircleId::new(20)),
+                Constraint::PerpendicularLineArc(LineId::new(10), ArcId::new(30)),
+                Constraint::EqualRadiusArc(ArcId::new(30), ArcId::new(31)),
+                Constraint::EqualRadiusCircleArc(CircleId::new(20), ArcId::new(30)),
             ],
+            reference_constraints: vec![],
         };
         assert_jacobian(&s);
+    }
+
+    #[test]
+    fn solves_symmetric_and_midpoint_constraints() {
+        // Line 1 along the x-axis from (0,0) to (10,0).
+        // Point 3 is midpoint of Line 1 → (5, 0).
+        // Point 4 is fixed at (3, 4), Point 5 is symmetric to Point 4 across Line 1 → (3, -4).
+        let s = Sketch {
+            points: vec![
+                p(1, 0.0, 0.0),
+                p(2, 10.0, 0.0),
+                p(3, 4.0, 1.0),
+                p(4, 3.0, 4.0),
+                p(5, 2.5, -3.5),
+            ],
+            lines: vec![line(1, 1, 2)],
+            constraints: vec![
+                Constraint::FixedPoint(PointId::new(1), 0.0, 0.0),
+                Constraint::FixedPoint(PointId::new(2), 10.0, 0.0),
+                Constraint::FixedPoint(PointId::new(4), 3.0, 4.0),
+                Constraint::Midpoint(PointId::new(3), LineId::new(1)),
+                Constraint::Symmetric(PointId::new(4), PointId::new(5), LineId::new(1)),
+            ],
+            ..Default::default()
+        };
+        let res = solve(&s);
+        assert!(res.converged, "max residual {}", res.max_residual);
+        assert!(res.max_residual < 1e-9);
+        assert!((res.params[4] - 5.0).abs() < 1e-9);
+        assert!((res.params[5] - 0.0).abs() < 1e-9);
+        assert!((res.params[8] - 3.0).abs() < 1e-9);
+        assert!((res.params[9] - (-4.0)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn cg_solver_matches_cholesky() {
+        let j = DMatrix::from_row_slice(3, 2, &[2.0, 1.0, 1.0, 3.0, 0.5, -1.0]);
+        let r = DVector::from_vec(vec![1.0, -2.0, 0.5]);
+        let mu = 1e-3;
+        let cg = solve_normal_cg(&j, &r, mu, 50);
+        let mut h = j.transpose() * &j;
+        h[(0, 0)] += mu;
+        h[(1, 1)] += mu;
+        let exact = h.cholesky().unwrap().solve(&(-(j.transpose() * &r)));
+        assert!((cg - exact).norm() < 1e-10);
     }
 
     #[test]
@@ -646,5 +1046,44 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(solve(&s).dof, 0);
+    }
+
+    #[test]
+    fn single_constraint_m_eq_1_solves_without_panic() {
+        let s = Sketch {
+            points: vec![p(1, 300.0, 700.0), p(2, 900.0, 720.0)],
+            lines: vec![line(1, 1, 2)],
+            constraints: vec![Constraint::Horizontal(LineId::new(1))],
+            ..Default::default()
+        };
+        let res = solve(&s);
+        assert!(res.converged);
+        assert!(res.max_residual < 1e-9);
+        assert_eq!(res.rank, 1);
+        assert_eq!(res.dof, 3);
+    }
+
+    #[test]
+    fn constrained_params_identifies_locked_and_free_entities() {
+        // Point 1 fixed at (0,0), Point 2 horizontal from Point 1 with LineLength 50 -> fully constrained!
+        // Point 3 is completely free -> unconstrained!
+        let s = Sketch {
+            points: vec![p(1, 0.0, 0.0), p(2, 48.0, 1.0), p(3, 10.0, 20.0)],
+            lines: vec![line(1, 1, 2)],
+            constraints: vec![
+                Constraint::FixedPoint(PointId::new(1), 0.0, 0.0),
+                Constraint::Horizontal(LineId::new(1)),
+                Constraint::LineLength(LineId::new(1), 50.0),
+            ],
+            ..Default::default()
+        };
+        let res = solve(&s);
+        assert!(res.converged);
+        assert_eq!(res.dof, 2);
+        // Point 1 (0, 1) and Point 2 (2, 3) are locked; Point 3 (4, 5) is free.
+        assert_eq!(
+            res.constrained_params,
+            vec![true, true, true, true, false, false]
+        );
     }
 }

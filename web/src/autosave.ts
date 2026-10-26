@@ -8,6 +8,7 @@ import {
   RASTER_STORE,
   type Kv,
 } from './idb';
+import type { PageWorkspaceState } from './project';
 
 const SESSION_KEY = 'session';
 
@@ -21,6 +22,7 @@ export interface AutosaveMeta {
   pageIndex: number;
   pageCount: number;
   savedAt: number;
+  pages?: Record<number, PageWorkspaceState>;
 }
 
 export interface AutosaveRecord {

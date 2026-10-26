@@ -15,10 +15,11 @@ resolved from the live registries on 2026-10-24.
 
 ## Rust workspace
 
-- **Cargo workspace** with `members = ["crates/rf-core", "crates/rf-wasm"]` and
-  `default-members = ["crates/rf-core"]`. Rationale: native `cargo build/test`
+- **Cargo workspace** with `members = ["crates/rf-core", "crates/rf-wasm", "crates/rf-cli"]` and
+  `default-members = ["crates/rf-core", "crates/rf-cli"]`. Rationale: native `cargo build/test`
   must not require the `wasm32-unknown-unknown` target or wasm-bindgen; the wasm
-  crate is built explicitly for its target only.
+  crate is built explicitly for its target only. `rf-cli` is a native JSON-in/JSON-out
+  bridge used by the FastAPI backend.
 - **edition 2021** (MSRV conservative; the pinned toolchain is current stable
   1.94).
 - **Dependencies** (workspace, added lazily):
@@ -167,6 +168,13 @@ resolved from the live registries on 2026-10-24.
   JSON/CSV fit-report, zip project save/open (fflate), accessibility (axe), and
   the final Docker D1–D7 verification.
 
+## M8 complete v1 numeric & UI decisions
+
+- **Arc parameterization**: `SketchArc` stores `center: PointId`, `radius: f64`, `start_angle: f64`, `end_angle: f64` (`[r, α₁, α₂]` in the solver parameter vector `q`), avoiding over-constrained endpoint radius mismatch while supporting `PointOnArc`, `ArcRadius`, and `TangentLineArc` via exact dual-number autodiff.
+- **Post-convergence Newton projection**: Both `solver::solve` and `fitter::fit` run minimum-norm Newton projection (`Δq = -Jcᵀ (Jc Jcᵀ + εI)⁻¹ c(q)`) so that satisfied constraints hold to `‖c(q)‖∞ < 1e-9 mm` even when fitting against noisy rasters.
+- **Tiled `f32` ridge detection & spatial hash**: `detect_ridges_roi` processes `512 × 512` tiles with a halo of `background_radius + 3·σ_max + 2`, using `f32` intermediate buffers per tile and `f64` sub-pixel quadratic interpolation, indexed by a `16 px` spatial hash (`RidgeIndex`) for fast nearest-centerline queries.
+- **Robust IRLS KKT fitter**: Uncovered samples (outside `capture_radius_px` or with mask weight `≤ 1e-3`) are discarded rather than penalized (`T10`); inlier samples are weighted by `√w_mask · w_cauchy(d_n / c)` alongside a tangent alignment residual (`T4`). Construction geometry (`construction: true`) is excluded from fitting by default.
+
 ## WASM bridge
 
 - **Boundary**: all values cross as JSON strings (or `Uint8Array` for gray
@@ -175,25 +183,66 @@ resolved from the live registries on 2026-10-24.
   `solve_constraints`, `export_dxf`/`export_svg`, `detect_ridges`, `fit_sketch`.
 - **Packaging**: `web/scripts/build-wasm.sh` (`npm run wasm:build`) builds the
   wasm crate and runs `wasm-bindgen --target web` into `web/public/wasm/`
-  (gitignored), so Vite serves it verbatim and nginx ships it under CSP
-  (`script-src 'wasm-unsafe-eval'`). The app lazy-loads it in `web/src/wasm.ts`
+  (gitignored), so Vite serves it verbatim and the backend/static host ships it
+  under CSP (`script-src 'wasm-unsafe-eval'`). The app lazy-loads it in `web/src/wasm.ts`
   and sets `data-wasm` for the e2e smoke.
 - **Docker**: the `wasm` stage builds the crate and pins the wasm-bindgen CLI to
   the `Cargo.lock` version (fail on mismatch, D6); the `web` stage copies the
   package before `vite build`.
 
+## Native backend (FastAPI + `rf-cli`)
+
+- **`server/app.py`** is a FastAPI backend that shells out to the same `rf-core`
+  compiled as the native `crates/rf-cli` binary (`solve`, `fit`,
+  `detect-ridges`, `snap-ridge`, `export-dxf/svg`, `report-json/csv`), plus
+  PyMuPDF/OpenCV/NumPy for PDF rendering and raster preprocessing. The Rust core
+  stays the single source of truth for the numerics.
+- **Hybrid client** (`web/src/backend.ts`): `checkNativeBackend()` probes
+  `/api/health`; when reachable the app uses `/api/*`, otherwise it falls back
+  to the in-browser WASM bindings. This keeps the app fully offline-capable
+  (D7) and lets a static `dist/` build work with no server.
+- **Session storage**: uploaded rasters and derived artifacts (`gray.bin`,
+  `ridges.json`, `meta.json`) are written under `tempfile.gettempdir()` (the
+  container mounts `/tmp` as tmpfs), keyed by a per-upload `uuid`; nothing is
+  persisted across restarts.
+- **Security headers** are set by FastAPI middleware (the same CSP as the
+  retired nginx config): `script-src 'self' 'wasm-unsafe-eval'`,
+  `connect-src 'self'`, `worker-src 'self' blob:`, `img-src 'self' blob: data:`,
+  plus nosniff / referrer / permissions-policy.
+
+## User management & auth
+
+- **Storage**: SQLite via stdlib `sqlite3` at `/data/rasterfit.db` (env
+  `RASTERFIT_DB`), so no ORM dependency; `users` + `sessions` tables.
+- **Passwords**: `hashlib.scrypt` (n=2^14, r=8, p=1) with a per-user 128-bit
+  salt; never stored in plaintext. stdlib-only, so no `bcrypt`/`argon2`
+  dependency.
+- **Sessions**: opaque `secrets.token_urlsafe` tokens; only the SHA-256 hash is
+  stored, delivered as an `HttpOnly` + `SameSite=Lax` cookie with a 12 h TTL.
+- **Roles**: `superadmin` (manages users) and `user`. `/api/users/*` requires
+  `superadmin`; all other `/api/*` routes require any authenticated user
+  (`/api/health` and `/healthz` stay open for probes).
+- **Bootstrap**: first start creates a superadmin from
+  `RASTERFIT_SUPERADMIN_USERNAME`/`RASTERFIT_SUPERADMIN_PASSWORD` (random
+  password logged if unset). Lockout guards: cannot delete yourself, nor the
+  last active superadmin.
+- **Client**: `web/src/account.ts` renders login + user management; when not
+  authenticated the app falls back to the WASM core (`web/src/backend.ts`
+  treats 401 as "use WASM").
+
 ## Docker
 
-- **`node:24-alpine`** (web stage) — matches the pinned Node 24 LTS.
-- **`nginxinc/nginx-unprivileged:alpine`** (runtime) — non-root by default,
-  port 8080, small image. Satisfies D2 (non-root) and D5 (< 30 MB).
-- **M0 Dockerfile is web → runtime only.** The `wasm` stage (pinned Rust image +
-  `rustup target add wasm32-unknown-unknown` + pinned wasm-bindgen CLI +
-  `wasm-opt`) and the `test` stage are added in M1/M3, once the app links the
-  WASM core. Deferring is honest here: the wasm toolchain is not installed in
-  this environment (see `ENV.md`) and the M0 app has no WASM dependency.
+- **`rust:1.94.0`** (`rust-builder` stage) — builds the native `rf-cli` and the
+  `rf-wasm` package; pins the wasm-bindgen CLI to the `Cargo.lock` version (fail
+  on mismatch, D6).
+- **`node:24-alpine`** (`web` stage) — matches the pinned Node 24 LTS; copies the
+  wasm package then runs `vite build`.
+- **`python:3.12-slim`** (runtime) — runs `uvicorn server.app:app` (FastAPI) with
+  the native `rf-cli` binary and the built `web/dist`. Non-root `uid 1000`;
+  read-only root FS is enforced by `compose.yaml` (not the image).
 - **Buildx**: not available on the dev host → `linux/arm64` builds (D6) are
-  unverified here; single-arch `docker build` is used.
+  exercised on CI (the `multiarch` job); single-arch `docker build` is used
+  locally.
 
 ## Design tokens
 

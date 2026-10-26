@@ -14,19 +14,6 @@ pub mod sketch;
 pub mod solver;
 pub mod svg;
 
-// Modules are added as their milestones land (M2..M7):
-// pub mod calibration;
-// pub mod constraints;
-// pub mod dxf;
-// pub mod fitter;
-// pub mod mask;
-// pub mod project;
-// pub mod raster;
-// pub mod report;
-// pub mod ridge;
-// pub mod solver;
-// pub mod svg;
-
 /// Precision type used for all world-space / math quantities.
 pub type F = f64;
 

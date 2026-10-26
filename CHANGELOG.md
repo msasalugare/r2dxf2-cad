@@ -9,6 +9,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Native backend (FastAPI + `rf-cli`)**: a `server/app.py` FastAPI backend
+  shells out to the same `rf-core` compiled as the native `crates/rf-cli`
+  binary, with PyMuPDF/OpenCV/NumPy for PDF rendering and raster preprocessing;
+  `web/src/backend.ts` probes `/api/health` and uses `/api/*` when reachable,
+  falling back to the in-browser WASM core otherwise (offline/static hosting).
+  The Docker runtime moved from nginx to `python:3.12-slim` + uvicorn, security
+  headers now live in FastAPI middleware, and `docker/nginx.conf` was removed.
+  The runtime image is consequently ~320 MB (vs ~28 MB for the static nginx
+  image), so the D5 "image < 30 MB" criterion was retired and the CI size guard
+  now asserts `< 800 MB`.
+
+- **User management (superadmin + users)**: the native backend now supports
+  optional self-hosted accounts — a superadmin defines/edits/deletes users
+  (`/api/auth/*`, `/api/users`), passwords are hashed with stdlib `scrypt`,
+  sessions use HttpOnly cookies, and users/sessions persist in SQLite on the
+  `rasterfit_data` volume. The web app adds a login + user-management panel;
+  without a sign-in it falls back to the in-browser WASM core.
+
+- **Complete v1 `rf-core` & `rf-wasm` pipeline**:
+  - Added `SketchArc` (`ArcId`) and all 25 v1 `Constraint` variants (`TangentLineArc`, `TangentCircleCircle`, `Symmetric`, `Midpoint`, `Collinear`, `DistancePointLine`, `HorizontalDistance`, `VerticalDistance`, `Diameter`, `ArcRadius`, `PointOnArc`, plus reference/driven constraints).
+  - Added post-convergence minimum-norm Newton projection (`‖c‖∞ < 1e-9 mm`) and Conjugate Gradient (`solve_normal_cg`) fallback above 1500 parameters.
+  - Added tiled `detect_ridges_roi` (512 px tiles with halo and `f32` intermediate buffers), sub-pixel `snap_to_ridge`, and spatial hash `RidgeIndex`.
+  - Upgraded `rf-core::fitter` with Cauchy IRLS robust weighting, continuous mask `√w_c` weighting, tangent alignment term, uncovered sample exclusion, construction geometry exclusion, `fit_step`, per-primitive fit report (`PrimitiveFitStat`), and standard error estimation (`transform_stddev`).
+  - Added `ARC` entity export to `rf-core::dxf` and `rf-core::svg`.
+  - Enabled WASM `simd128` in `build-wasm.sh` and `docker/Dockerfile`, and added `--target test` stage to `docker/Dockerfile`.
+- **Complete Web UI & Persistence**:
+  - Fixed `raster.worker.ts` buffer detachment bug on `get-gray` so repeated fit/snap calls work reliably.
+  - Added `Line` / `Circle` / `Arc` / `Point` / `Select` (drag-to-solve) tools, `Construction` toggle, auto-constraints (5° H/V + coincident snap), full constraint inspector (add/delete/reference toggle), Undo/Redo (`Ctrl+Z`/`Ctrl+Y`), residual heat-map overlay, background transform synchronization after fit, and **DXF / SVG / JSON / CSV** export buttons in `sketch-ui.ts`.
+  - Added `Brush` / `Rect` / `Polygon` / `Eraser` tools, RDP stroke simplification (`tol = 0.25 px`), radius slider (`[` / `]`), `X` mode toggle, Undo/Redo, *Mask from sketch*, and *Invert* in `mask-ui.ts`.
+  - Added sub-pixel ridge snap (`Alt` to disable), `8×` magnifying loupe overlay, `Angle` orientation option, mm + % residuals, leave-one-out (`LOO`) diagnostics, and background adjustment controls (`±0.01°`, Flip H/V, Invert) in `calibration-ui.ts`.
+  - Persisted full per-page workspace state (`calibration`, `sketch`, `mask`, `transform`, `fitReport`, `rasterSha256`) in `.rasterfit.zip` and IndexedDB autosave.
+
 - **Viewer UX fixes**: middle-button pan (works while a tool is active),
   two-finger pinch zoom + pan, more responsive wheel zoom, and tighter
   fit padding.

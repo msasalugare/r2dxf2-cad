@@ -91,6 +91,14 @@ export function solveIsotropic(segments: CalibrationSegment[]): number | null {
   return num / den;
 }
 
+/** Fold an angle into (-π/2, π/2] so undirected lines (A→B vs B→A) never flip 180°. */
+export function foldHalfTurn(a: number): number {
+  let out = normalizeAngle(a);
+  if (out > FRAC_PI_2) out -= PI;
+  if (out <= -FRAC_PI_2) out += PI;
+  return out;
+}
+
 /** Rotation θ from H/V/angle segments (length-weighted circular mean). */
 export function solveRotation(segments: CalibrationSegment[]): number | null {
   let sinSum = 0;
@@ -101,7 +109,11 @@ export function solveRotation(segments: CalibrationSegment[]): number | null {
     if (phi === null) continue;
     const d = pixelLength(seg);
     if (d <= 0) continue;
-    const thetaK = phi + rasterAngle(seg);
+    const rawTheta = phi + rasterAngle(seg);
+    const thetaK =
+      seg.orientation.type === 'horizontal' || seg.orientation.type === 'vertical'
+        ? foldHalfTurn(rawTheta)
+        : normalizeAngle(rawTheta);
     sinSum += d * Math.sin(thetaK);
     cosSum += d * Math.cos(thetaK);
     weightSum += d;

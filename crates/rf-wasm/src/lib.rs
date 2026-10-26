@@ -6,10 +6,13 @@
 
 use wasm_bindgen::prelude::*;
 
-use rf_core::fitter::{fit, fit_masked, FitterParams};
+use rf_core::fitter::{fit, fit_masked, fit_step, FitterParams};
 use rf_core::mask::{MaskParams, MaskStroke};
 use rf_core::report::{summary_csv, summary_json};
-use rf_core::ridge::{detect_ridges as ridge_detect, RidgeParams};
+use rf_core::ridge::{
+    detect_ridges as ridge_detect, detect_ridges_roi as ridge_detect_roi,
+    snap_to_ridge as ridge_snap, RidgeParams, Roi,
+};
 use rf_core::sketch::Sketch;
 use rf_core::solver::solve;
 
@@ -60,6 +63,35 @@ pub fn detect_ridges(
     serde_json::to_string(&ridge_detect(gray, width, height, &params)).map_err(err)
 }
 
+/// Detect ridge points inside a bounding box `[x0, y0, x1, y1)` of a gray8 buffer.
+#[wasm_bindgen]
+pub fn detect_ridges_roi(
+    gray: &[u8],
+    width: usize,
+    height: usize,
+    roi_json: &str,
+    params_json: &str,
+) -> Result<String, JsValue> {
+    let roi: Roi = parse(roi_json)?;
+    let params: RidgeParams = parse(params_json)?;
+    serde_json::to_string(&ridge_detect_roi(gray, width, height, roi, &params)).map_err(err)
+}
+
+/// Snap a raster point `(u, v)` to the nearest sub-pixel ridge within `radius` px.
+/// Returns JSON `Point` (`{"x": ..., "y": ...}`) or `"null"`.
+#[wasm_bindgen]
+pub fn snap_to_ridge(
+    gray: &[u8],
+    width: usize,
+    height: usize,
+    u: f64,
+    v: f64,
+    radius: f64,
+) -> Result<String, JsValue> {
+    let snapped = ridge_snap(gray, width, height, u, v, radius);
+    serde_json::to_string(&snapped).map_err(err)
+}
+
 /// Fit a constrained sketch to centerlines; returns JSON `FitterResult`.
 #[wasm_bindgen]
 pub fn fit_sketch(
@@ -75,8 +107,24 @@ pub fn fit_sketch(
     serde_json::to_string(&fit(&sketch, &centerlines, &initial, &params)).map_err(err)
 }
 
+/// Execute a single step-by-step fitter iteration; returns JSON `FitterResult`.
+#[wasm_bindgen]
+pub fn fit_sketch_step(
+    sketch_json: &str,
+    centerlines_json: &str,
+    current_t_json: &str,
+    params_json: &str,
+) -> Result<String, JsValue> {
+    let sketch: Sketch = parse(sketch_json)?;
+    let centerlines: Vec<rf_core::ridge::RidgePoint> = parse(centerlines_json)?;
+    let current_t: [f64; 3] = parse(current_t_json)?;
+    let params: FitterParams = parse(params_json)?;
+    serde_json::to_string(&fit_step(&sketch, &centerlines, &current_t, &params)).map_err(err)
+}
+
 /// Fit a constrained sketch to masked centerlines; returns JSON `FitterResult`.
 #[wasm_bindgen]
+#[allow(clippy::too_many_arguments)]
 pub fn fit_sketch_masked(
     sketch_json: &str,
     centerlines_json: &str,
@@ -113,7 +161,7 @@ pub fn fit_report_json(result_json: &str) -> Result<String, JsValue> {
     Ok(summary_json(&result))
 }
 
-/// Summarize a fit result (JSON) to a one-row CSV.
+/// Summarize a fit result (JSON) to CSV (overall summary + per-primitive table).
 #[wasm_bindgen]
 pub fn fit_report_csv(result_json: &str) -> Result<String, JsValue> {
     let result: rf_core::fitter::FitterResult = parse(result_json)?;

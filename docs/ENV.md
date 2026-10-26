@@ -1,5 +1,13 @@
 # Environment report (Phase 0)
 
+> **Note (2026-10-26)**: the runtime has since moved from a static nginx image
+> to a Python FastAPI + native `rf-cli` backend (see `docs/DECISIONS.md` →
+> "Native backend"). The Docker criteria table and the "Docker status" summary
+> below predate that change. D2/D3 were **re-verified against the new image** on
+> 2026-10-26 (see "Re-verification" below); D5's "image < 30 MB" criterion no
+> longer applies because the native backend image is ~320 MB.
+> This file is retained as the original Phase 0 environment record.
+
 Captured: 2026-10-24, on the machine where the project is developed.
 
 This file records what was actually checked, with the exact command output, per the
@@ -122,7 +130,9 @@ All checks are HTTP status of a real request (curl), 15–20 s timeout.
 ## Docker criteria verification (D1–D7)
 
 Verified 2026-10-24 against a single-arch `docker build` + `docker run` (the dev
-host has no buildx or Compose v2 plugin — see above).
+host has no buildx or Compose v2 plugin — see above). This table documents the
+**original static nginx image**; the native FastAPI + `rf-cli` image is covered
+in "Re-verification against the native backend image" below.
 
 | Criterion | Status | Evidence |
 | --- | --- | --- |
@@ -130,6 +140,26 @@ host has no buildx or Compose v2 plugin — see above).
 | D2 healthcheck < 10 s, non-root, read-only | ✅ | healthy in ~15 ms; `uid=101(nginx)`; write to `/usr/share/nginx/html` fails (read-only) |
 | D3 wasm `application/wasm` + CSP + local PDF.js worker | ✅ | `/wasm/rf_wasm_bg.wasm` → `application/wasm`; CSP has `wasm-unsafe-eval`; PDF import e2e passes |
 | D4 e2e against the container | ✅ | 16/16 Playwright tests pass against the running container |
-| D5 image < 30 MB | ✅ | 27.62 MB |
+| D5 image < 30 MB | ✅ (static image only) | 27.62 MB |
 | D6 multi-arch + wasm-bindgen CLI version check | ⚠️ covered in CI | the `multiarch` CI job runs `docker buildx build --platform linux/amd64,linux/arm64`; the CLI-version check is in the Dockerfile. Note: the arm64 leg recompiles wasm-bindgen-cli under qemu and is slow |
 | D7 works after network is disabled | ✅ | `offline.spec.ts` blocks all requests after load and still solves a sketch |
+
+## Re-verification against the native backend image (2026-10-26)
+
+The runtime moved to `python:3.12-slim` + FastAPI + native `rf-cli` (see
+`docs/DECISIONS.md` → "Native backend"). The image was built locally as
+`rasterfit:final` (319,791,031 bytes ≈ 320 MB) and run with the compose-equivalent
+flags (`--read-only`, `--tmpfs /tmp --tmpfs /run`, `--cap-drop ALL`,
+`--security-opt no-new-privileges:true`, `USER 1000:1000`).
+
+| Criterion | Status | Evidence |
+| --- | --- | --- |
+| D2 healthcheck, non-root, read-only | ✅ | `/healthz` → `ok` (200) after ~5 s; process runs as `uid=1000 gid=1000`; write to `/` fails (`Read-only file system`) |
+| D3 wasm MIME + CSP | ✅ | `/wasm/rf_wasm_bg.wasm` → `application/wasm`; CSP `default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:; img-src 'self' blob: data:; connect-src 'self'` |
+| D5 image size | ⚠️ criterion changed | ~320 MB (native backend); the "< 30 MB" static criterion is retired — the CI guard now asserts `< 800 MB` |
+| Accounts bootstrap + auth | ✅ | first start created superadmin from env; `/api/auth/login` → 200 + `HttpOnly` session cookie; `/api/auth/me` returns the user; wrong password → 401 |
+| D7 offline | ✅ covered in CI | unchanged from the static image: the browser falls back to WASM when `/api/*` is unreachable (`offline.spec.ts`); the native backend is optional |
+
+Note: with no `/data` volume mounted, the SQLite DB falls back to
+`/tmp/rasterfit.db` (ephemeral) because the root FS is read-only; `compose.yaml`
+wires `/data` to the writable `rasterfit_data` volume for persistence.

@@ -1,15 +1,26 @@
-// Application controller: wires the DOM, raster viewer, import pipeline, and
-// IndexedDB autosave together. No UI framework — plain DOM + Canvas.
+// Application controller: wires the DOM, raster viewer, import pipeline,
+// per-page workspace persistence, and IndexedDB autosave together.
+// No UI framework — plain DOM + Canvas.
 
+import { AccountController } from './account';
 import { Autosave, type AutosaveMeta } from './autosave';
+import { checkNativeBackend, uploadRasterToBackend } from './backend';
 import { CalibrationController } from './calibration-ui';
 import { MaskController } from './mask-ui';
 import { SketchController } from './sketch-ui';
 import { IdbStore, MemoryKv, openDatabase } from './idb';
 import { detectLocale, t, tf, type Locale } from './i18n';
 import { Importer, type ImportDocument, type ImportErrorCode } from './import';
-import { blobToBytes, bytesToBlob, unzipProject, zipProject } from './project';
+import {
+  blobToBytes,
+  bytesToBlob,
+  hashBytes,
+  unzipProject,
+  zipProject,
+  type PageWorkspaceState,
+} from './project';
 import type { RasterPage } from './raster';
+import { createSampleBlob } from './sample';
 import { initTheme, toggleTheme } from './theme';
 import { RasterViewer } from './viewer';
 
@@ -32,14 +43,20 @@ export function initApp(): () => void {
   const calibrationPanel = document.querySelector<HTMLElement>('#calibration-panel')!;
   const sketchPanel = document.querySelector<HTMLElement>('#sketch-panel')!;
   const maskPanel = document.querySelector<HTMLElement>('#mask-panel')!;
+  const accountBtn = document.querySelector<HTMLElement>('#account-btn')!;
+  const accountPanel = document.querySelector<HTMLElement>('#account-panel')!;
   const fileInput = document.querySelector<HTMLInputElement>('#file-input')!;
   const projectInput = document.querySelector<HTMLInputElement>('#project-input')!;
   const status = document.querySelector<HTMLElement>('#status')!;
+  const dofEl = document.querySelector<HTMLElement>('#dof')!;
   const coords = document.querySelector<HTMLElement>('#coords')!;
   const zoom = document.querySelector<HTMLElement>('#zoom')!;
 
   const viewer = new RasterViewer(canvas);
   const importer = new Importer();
+  const account = new AccountController(accountPanel, accountBtn, locale, (user) => {
+    document.documentElement.dataset.user = user ? user.username : '';
+  });
 
   let kv: IdbStore | MemoryKv;
   let autosave: Autosave | null = null;
@@ -47,10 +64,56 @@ export function initApp(): () => void {
   let activePage: RasterPage | null = null;
   let pageIndex = 0;
   let originalBlob: Blob | null = null;
+  let pageWorkspaces: Record<number, PageWorkspaceState> = {};
 
   const setStatus = (msg: string, isError = false): void => {
     status.textContent = msg;
     status.classList.toggle('is-error', isError);
+  };
+
+  const captureCurrentPageState = (): PageWorkspaceState => {
+    const cal = calibration.exportState();
+    const sk = sketch.exportState();
+    return {
+      rasterTransform: viewer.getRasterTransform(),
+      calibrationSegments: cal.segments,
+      calibrationScale: cal.scale,
+      sketch: sk.sketch,
+      maskStrokes: mask.exportState(),
+      lastFitReportJson: sk.lastFitReportJson,
+    };
+  };
+
+  const applyPageState = (state: PageWorkspaceState | undefined): void => {
+    if (!state) {
+      viewer.resetRasterTransform();
+      calibration.importState({ segments: [] });
+      sketch.importState({
+        points: [],
+        lines: [],
+        circles: [],
+        arcs: [],
+        constraints: [],
+        reference_constraints: [],
+      });
+      mask.importState([]);
+      return;
+    }
+    viewer.setRasterTransform(state.rasterTransform);
+    calibration.importState({
+      segments: state.calibrationSegments ?? [],
+      scale: state.calibrationScale,
+    });
+    sketch.importState(state.sketch, state.lastFitReportJson);
+    mask.importState(state.maskStrokes ?? []);
+  };
+
+  const syncWorkspaceAndAutosave = (): void => {
+    if (!doc) return;
+    pageWorkspaces[pageIndex] = captureCurrentPageState();
+    if (originalBlob) {
+      saveSession(originalBlob, autosaveMeta(doc, pageIndex, pageWorkspaces));
+    }
   };
 
   const calibration = new CalibrationController(
@@ -59,11 +122,21 @@ export function initApp(): () => void {
     locale,
     setStatus,
     () => (activePage ? { width: activePage.meta.width, height: activePage.meta.height } : null),
+    syncWorkspaceAndAutosave,
   );
 
-  const mask = new MaskController(viewer, maskPanel, locale, setStatus);
+  let sketch: SketchController;
 
-  const sketch = new SketchController(
+  const mask = new MaskController(
+    viewer,
+    maskPanel,
+    locale,
+    setStatus,
+    () => sketch.getLineSegments(),
+    syncWorkspaceAndAutosave,
+  );
+
+  sketch = new SketchController(
     viewer,
     sketchPanel,
     locale,
@@ -77,6 +150,11 @@ export function initApp(): () => void {
       }
     },
     () => mask.getStrokes(),
+    (dof, dofStatus) => {
+      dofEl.textContent = tf(locale, 'status.dof', { dof });
+      dofEl.dataset.status = dofStatus;
+    },
+    syncWorkspaceAndAutosave,
   );
 
   const refreshZoom = (): void => {
@@ -85,30 +163,78 @@ export function initApp(): () => void {
     });
   };
 
+  const syncModeButtons = (): void => {
+    const calBtn = document.querySelector<HTMLButtonElement>('#calibrate-btn');
+    const skBtn = document.querySelector<HTMLButtonElement>('#sketch-btn');
+    const mkBtn = document.querySelector<HTMLButtonElement>('#mask-btn');
+    if (calBtn) calBtn.setAttribute('aria-pressed', String(calibration.isActive()));
+    if (skBtn) skBtn.setAttribute('aria-pressed', String(sketch.isActive()));
+    if (mkBtn) mkBtn.setAttribute('aria-pressed', String(mask.isActive()));
+    canvas.style.cursor = sketch.isActive()
+      ? sketch.getCursor()
+      : calibration.isActive() || mask.isActive()
+        ? 'crosshair'
+        : 'grab';
+  };
+
   viewer.onCameraChange = refreshZoom;
   viewer.onOverlay = (ctx) => {
+    syncModeButtons();
     calibration.drawOverlay(ctx);
     sketch.drawOverlay(ctx);
     mask.drawOverlay(ctx);
   };
-  viewer.onClick = (clientX, clientY) => {
-    if (calibration.isActive()) return calibration.handleClick(clientX, clientY);
-    if (sketch.isActive()) return sketch.handleClick(clientX, clientY);
+  viewer.onClick = (clientX, clientY, altKey) => {
+    if (calibration.isActive()) return calibration.handleClick(clientX, clientY, altKey);
+    if (sketch.isActive()) return sketch.handleClick(clientX, clientY, altKey);
+    if (mask.isActive()) return mask.handleClick(clientX, clientY);
     return false;
+  };
+  viewer.onDoubleClick = () => {
+    if (sketch.isActive()) return sketch.finishChain();
+    if (mask.isActive()) return mask.finishPolygon();
+    return false;
+  };
+  viewer.onContextMenu = () => {
+    if (calibration.isActive()) return calibration.cancelPending();
+    if (sketch.isActive()) return sketch.finishChain();
+    if (mask.isActive()) return mask.finishPolygon();
+    return false;
+  };
+  viewer.onPointerHover = (clientX, clientY, altKey) => {
+    const rect = canvas.getBoundingClientRect();
+    const mx = clientX - rect.left;
+    const my = clientY - rect.top;
+    calibration.setLastMouse(mx, my);
+    sketch.setLastMouse(mx, my, altKey);
+    mask.setLastMouse(mx, my);
   };
   viewer.onDrag = (clientX, clientY, phase) => {
+    if (calibration.isActive()) return calibration.handleDrag(clientX, clientY, phase);
     if (mask.isActive()) return mask.handleDrag(clientX, clientY, phase);
+    if (sketch.isActive()) return sketch.handleDrag(clientX, clientY, phase);
     return false;
   };
+
+  // Clicking the canvas moves keyboard focus back to the viewer so shortcuts
+  // (e.g. Delete/Backspace) aren't swallowed by a focused panel input/select.
+  canvas.addEventListener('pointerdown', () => {
+    const ae = document.activeElement;
+    if (
+      ae instanceof HTMLInputElement ||
+      ae instanceof HTMLTextAreaElement ||
+      ae instanceof HTMLSelectElement
+    ) {
+      ae.blur();
+    }
+  });
 
   canvas.addEventListener('pointermove', (e) => {
     const p = viewer.clientToWorld(e.clientX, e.clientY);
     coords.textContent = tf(locale, 'status.coords', {
-      x: Math.round(p.x),
-      y: Math.round(p.y),
+      x: p.x.toFixed(1),
+      y: p.y.toFixed(1),
     });
-    const rect = canvas.getBoundingClientRect();
-    calibration.setLastMouse(e.clientX - rect.left, e.clientY - rect.top);
   });
 
   const saveSession = (blob: Blob, meta: AutosaveMeta): void => {
@@ -134,13 +260,36 @@ export function initApp(): () => void {
     }
   };
 
-  const showDocument = (nextDoc: ImportDocument, page: RasterPage, index: number, blob: Blob | null): void => {
+  const preloadPageGray = (page: RasterPage): void => {
+    void importer
+      .getGray(page.meta.pageIndex)
+      .then((g) => {
+        calibration.setGrayBuffer(g);
+        sketch.setGrayBuffer(g);
+      })
+      .catch(() => {
+        calibration.setGrayBuffer(null);
+        sketch.setGrayBuffer(null);
+      });
+  };
+
+  const showDocument = (
+    nextDoc: ImportDocument,
+    page: RasterPage,
+    index: number,
+    blob: Blob | null,
+    restoredPages?: Record<number, PageWorkspaceState>,
+  ): void => {
     doc = nextDoc;
     activePage = page;
     pageIndex = index;
     originalBlob = blob;
+    pageWorkspaces = restoredPages ? { ...restoredPages } : {};
 
     viewer.setPage(page);
+    applyPageState(pageWorkspaces[index]);
+    preloadPageGray(page);
+
     startCard.hidden = true;
     toolbar.hidden = false;
     pageNav.hidden = nextDoc.pageCount <= 1;
@@ -155,7 +304,10 @@ export function initApp(): () => void {
     refreshZoom();
 
     if (blob) {
-      saveSession(blob, autosaveMeta(nextDoc, index));
+      saveSession(blob, autosaveMeta(nextDoc, index, pageWorkspaces));
+      void uploadRasterToBackend(blob, nextDoc.fileName, 200, index + 1);
+    } else {
+      void createSampleBlob().then((b) => uploadRasterToBackend(b, 'sample.png', 200, 1));
     }
   };
 
@@ -163,6 +315,9 @@ export function initApp(): () => void {
     if (!doc) return;
     if (index === pageIndex && activePage) return;
     if (index < 0 || index >= doc.pageCount) return;
+
+    // Persist current page state before switching.
+    pageWorkspaces[pageIndex] = captureCurrentPageState();
 
     setStatus(t(locale, 'status.importing'));
     try {
@@ -173,10 +328,12 @@ export function initApp(): () => void {
       activePage = page;
       importer.freeGray(previous);
       viewer.setPage(page);
+      applyPageState(pageWorkspaces[index]);
+      preloadPageGray(page);
       renderPagesList(doc.pageCount, index);
       setStatus(tf(locale, 'status.page', { n: index + 1, total: doc.pageCount }));
       if (originalBlob) {
-        saveSession(originalBlob, autosaveMeta(doc, index));
+        saveSession(originalBlob, autosaveMeta(doc, index, pageWorkspaces));
       }
     } catch {
       setStatus(t(locale, 'error.failed'), true);
@@ -230,7 +387,7 @@ export function initApp(): () => void {
       setStatus(errorMessage(result.code), true);
       return;
     }
-    showDocument(result.doc, result.page, 0, file);
+    showDocument(result.doc, result.page, 0, file, record.meta.pages);
     if (record.meta.pageIndex > 0) {
       await showPage(record.meta.pageIndex);
     }
@@ -256,10 +413,6 @@ export function initApp(): () => void {
     }
   });
   document.querySelector('#sketch-btn')!.addEventListener('click', () => {
-    if (!activePage) {
-      setStatus(t(locale, 'sketch.none'), true);
-      return;
-    }
     if (sketch.isActive()) sketch.deactivate();
     else {
       calibration.deactivate();
@@ -279,6 +432,17 @@ export function initApp(): () => void {
       mask.activate();
     }
   });
+  document.querySelector('#origin-tool-btn')!.addEventListener('click', () => {
+    calibration.deactivate();
+    mask.deactivate();
+    if (!sketch.isActive()) sketch.activate();
+    sketch.setTool('origin');
+  });
+  document.querySelector('#origin-reset-btn')!.addEventListener('click', () => {
+    viewer.resetOrigin();
+    const o = viewer.getOrigin();
+    setStatus(`(0,0) → (${o.x.toFixed(0)}, ${o.y.toFixed(0)}) px`);
+  });
   document.querySelector('#save-project')!.addEventListener('click', () => void saveProject());
   document.querySelector('#open-project')!.addEventListener('click', () => projectInput.click());
   document.querySelector('#prev-btn')!.addEventListener('click', () => void showPage(pageIndex - 1));
@@ -293,6 +457,9 @@ export function initApp(): () => void {
   });
 
   document.querySelector('#theme-btn')!.addEventListener('click', () => toggleTheme());
+  accountBtn.addEventListener('click', () => {
+    accountPanel.hidden = !accountPanel.hidden;
+  });
 
   fileInput.addEventListener('change', () => {
     const file = fileInput.files?.[0];
@@ -301,14 +468,24 @@ export function initApp(): () => void {
   });
 
   const saveProject = async (): Promise<void> => {
-    if (!originalBlob || !doc) {
+    if (!doc) {
       setStatus(t(locale, 'error.failed'), true);
       return;
     }
     try {
-      const raster = await blobToBytes(originalBlob);
+      const blobToSave = originalBlob ?? (await createSampleBlob());
+      const raster = await blobToBytes(blobToSave);
+      pageWorkspaces[pageIndex] = captureCurrentPageState();
       const zip = zipProject(
-        { version: 1, savedAt: Date.now(), fileName: doc.fileName, kind: doc.kind, pageIndex },
+        {
+          version: 1,
+          savedAt: Date.now(),
+          fileName: doc.fileName,
+          kind: doc.kind,
+          pageIndex,
+          rasterHash: hashBytes(raster),
+          pages: pageWorkspaces,
+        },
         raster,
       );
       const blob = bytesToBlob(zip, 'application/zip');
@@ -334,7 +511,7 @@ export function initApp(): () => void {
         setStatus(errorMessage(result.code), true);
         return;
       }
-      showDocument(result.doc, result.page, 0, rasterFile);
+      showDocument(result.doc, result.page, 0, rasterFile, data.pages);
       if (data.pageIndex > 0) await showPage(data.pageIndex);
     } catch {
       setStatus(t(locale, 'error.failed'), true);
@@ -371,16 +548,31 @@ export function initApp(): () => void {
   window.addEventListener('dragleave', dragLeave);
   window.addEventListener('drop', drop);
 
-  // Keyboard: zoom and fit.
+  // Keyboard: tool shortcuts, zoom and fit.
   const keydown = (e: KeyboardEvent): void => {
-    if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+    if (
+      e.target instanceof HTMLInputElement ||
+      e.target instanceof HTMLTextAreaElement ||
+      e.target instanceof HTMLSelectElement
+    ) {
+      return;
+    }
+    if (e.key === 'Escape' && calibration.isActive() && calibration.cancelPending()) return;
+    if (mask.handleKey(e)) return;
+    if (sketch.handleKey(e)) return;
     if (e.key === '+' || e.key === '=') viewer.zoomBy(1.25);
     else if (e.key === '-') viewer.zoomBy(1 / 1.25);
     else if (e.key === '0') viewer.fit();
   };
   window.addEventListener('keydown', keydown);
 
-  // --- Boot: autosave prompt ---------------------------------------------
+  // --- Boot: FreeCAD Sketcher-first workspace + autosave check ------------
+  toolbar.hidden = false;
+  sketch.activate();
+  refreshZoom();
+  void checkNativeBackend();
+  void account.init();
+
   void (async () => {
     try {
       const db = await openDatabase();
@@ -408,7 +600,11 @@ export function initApp(): () => void {
   };
 }
 
-function autosaveMeta(doc: ImportDocument, pageIndex: number): AutosaveMeta {
+function autosaveMeta(
+  doc: ImportDocument,
+  pageIndex: number,
+  pages: Record<number, PageWorkspaceState>,
+): AutosaveMeta {
   return {
     version: 1,
     kind: doc.kind,
@@ -416,12 +612,61 @@ function autosaveMeta(doc: ImportDocument, pageIndex: number): AutosaveMeta {
     pageIndex,
     pageCount: doc.pageCount,
     savedAt: Date.now(),
+    pages: Object.keys(pages).length > 0 ? pages : undefined,
   };
 }
 
 function markup(locale: Locale): string {
   return `
-  <canvas id="viewer" aria-label="RasterFit viewer"></canvas>
+  <div role="region" aria-label="Workspace">
+    <canvas id="viewer" aria-label="RasterFit viewer"></canvas>
+
+    <div class="toolbar" role="toolbar" aria-label="Viewer" hidden>
+      <button id="toolbar-open" class="tool-btn" type="button" title="${t(locale, 'start.open')}">${t(locale, 'start.open')}</button>
+      <span class="toolbar-spacer"></span>
+      <button id="calibrate-btn" class="tool-btn" type="button" title="${t(locale, 'toolbar.calibrate')} (C)">${t(locale, 'toolbar.calibrate')}</button>
+      <button id="sketch-btn" class="tool-btn" type="button" title="${t(locale, 'toolbar.sketch')} (S)">${t(locale, 'toolbar.sketch')}</button>
+      <button id="mask-btn" class="tool-btn" type="button" title="${t(locale, 'toolbar.mask')} (M)">${t(locale, 'toolbar.mask')}</button>
+      <span class="toolbar-spacer"></span>
+      <button id="origin-tool-btn" class="tool-btn" type="button" title="Move (0,0) Coordinate System Origin">🎯 (0,0)</button>
+      <button id="origin-reset-btn" class="tool-btn" type="button" title="Reset (0,0) to bottom-left corner of raster">↺ (0,0)</button>
+      <span class="toolbar-spacer"></span>
+      <button id="save-project" class="tool-btn" type="button" title="${t(locale, 'project.save')}">${t(locale, 'project.save')}</button>
+      <button id="open-project" class="tool-btn" type="button" title="${t(locale, 'project.open')}">${t(locale, 'project.open')}</button>
+      <span class="toolbar-spacer"></span>
+      <button id="zoom-out-btn" class="tool-btn" type="button" title="${t(locale, 'viewer.zoomOut')} (-)">−</button>
+      <button id="fit-btn" class="tool-btn" type="button" title="${t(locale, 'viewer.fit')} (0)">${t(locale, 'viewer.fit')}</button>
+      <button id="zoom-in-btn" class="tool-btn" type="button" title="${t(locale, 'viewer.zoomIn')} (+)">+</button>
+      <span class="toolbar-spacer"></span>
+      <span id="page-nav" class="page-nav" hidden>
+        <button id="prev-btn" class="tool-btn" type="button" title="${t(locale, 'pages.prev')}">‹</button>
+        <button id="pages-toggle" class="tool-btn" type="button">${t(locale, 'pages.title')}</button>
+        <button id="next-btn" class="tool-btn" type="button" title="${t(locale, 'pages.next')}">›</button>
+      </span>
+    </div>
+
+    <button id="account-btn" class="icon-btn" type="button" aria-label="${t(locale, 'account.login')}" title="${t(locale, 'account.login')}">👤</button>
+
+    <button id="theme-btn" class="icon-btn" type="button" aria-label="${t(locale, 'theme.toggle')}" title="${t(locale, 'theme.toggle')}">
+      <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+        <circle cx="12" cy="12" r="5"></circle>
+        <g stroke-linecap="round">
+          <line x1="12" y1="1" x2="12" y2="4"></line>
+          <line x1="12" y1="20" x2="12" y2="23"></line>
+          <line x1="4.22" y1="4.22" x2="6.34" y2="6.34"></line>
+          <line x1="17.66" y1="17.66" x2="19.78" y2="19.78"></line>
+          <line x1="1" y1="12" x2="4" y2="12"></line>
+          <line x1="20" y1="12" x2="23" y2="12"></line>
+          <line x1="4.22" y1="19.78" x2="6.34" y2="17.66"></line>
+          <line x1="17.66" y1="6.34" x2="19.78" y2="4.22"></line>
+        </g>
+      </svg>
+    </button>
+
+    <input id="file-input" type="file" hidden
+      accept=".pdf,.png,.jpg,.jpeg,.webp,application/pdf,image/png,image/jpeg,image/webp" />
+    <input id="project-input" type="file" hidden accept=".rasterfit.zip,application/zip" />
+  </div>
 
   <main class="start-card" role="main" aria-labelledby="title">
     <h1 id="title" class="title">${t(locale, 'app.title')}</h1>
@@ -433,31 +678,12 @@ function markup(locale: Locale): string {
     <p class="privacy">${t(locale, 'start.privacy')}</p>
   </main>
 
-  <div class="toolbar" role="toolbar" aria-label="Viewer" hidden>
-    <button id="toolbar-open" class="tool-btn" type="button" title="${t(locale, 'start.open')}">${t(locale, 'start.open')}</button>
-    <span class="toolbar-spacer"></span>
-    <button id="calibrate-btn" class="tool-btn" type="button">${t(locale, 'toolbar.calibrate')}</button>
-    <button id="sketch-btn" class="tool-btn" type="button">${t(locale, 'toolbar.sketch')}</button>
-    <button id="mask-btn" class="tool-btn" type="button">${t(locale, 'toolbar.mask')}</button>
-    <span class="toolbar-spacer"></span>
-    <button id="save-project" class="tool-btn" type="button">${t(locale, 'project.save')}</button>
-    <button id="open-project" class="tool-btn" type="button">${t(locale, 'project.open')}</button>
-    <span class="toolbar-spacer"></span>
-    <button id="zoom-out-btn" class="tool-btn" type="button" title="${t(locale, 'viewer.zoomOut')}">−</button>
-    <button id="fit-btn" class="tool-btn" type="button" title="${t(locale, 'viewer.fit')}">${t(locale, 'viewer.fit')}</button>
-    <button id="zoom-in-btn" class="tool-btn" type="button" title="${t(locale, 'viewer.zoomIn')}">+</button>
-    <span class="toolbar-spacer"></span>
-    <span id="page-nav" class="page-nav" hidden>
-      <button id="prev-btn" class="tool-btn" type="button" title="${t(locale, 'pages.prev')}">‹</button>
-      <button id="pages-toggle" class="tool-btn" type="button">${t(locale, 'pages.title')}</button>
-      <button id="next-btn" class="tool-btn" type="button" title="${t(locale, 'pages.next')}">›</button>
-    </span>
-  </div>
-
   <aside class="panel" id="pages-panel" aria-label="${t(locale, 'pages.title')}" hidden>
     <h2 class="panel-title">${t(locale, 'pages.title')}</h2>
     <ol class="pages-list" id="pages-list"></ol>
   </aside>
+
+  <aside class="panel" id="account-panel" aria-label="${t(locale, 'account.title')}" hidden></aside>
 
   <aside class="panel panel-wide" id="calibration-panel" aria-label="${t(locale, 'calibrate.title')}" hidden></aside>
 
@@ -473,31 +699,12 @@ function markup(locale: Locale): string {
     </div>
   </div>
 
-  <button id="theme-btn" class="icon-btn" type="button" aria-label="${t(locale, 'theme.toggle')}" title="${t(locale, 'theme.toggle')}">
-    <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
-      <circle cx="12" cy="12" r="5"></circle>
-      <g stroke-linecap="round">
-        <line x1="12" y1="1" x2="12" y2="4"></line>
-        <line x1="12" y1="20" x2="12" y2="23"></line>
-        <line x1="4.22" y1="4.22" x2="6.34" y2="6.34"></line>
-        <line x1="17.66" y1="17.66" x2="19.78" y2="19.78"></line>
-        <line x1="1" y1="12" x2="4" y2="12"></line>
-        <line x1="20" y1="12" x2="23" y2="12"></line>
-        <line x1="4.22" y1="19.78" x2="6.34" y2="17.66"></line>
-        <line x1="17.66" y1="6.34" x2="19.78" y2="4.22"></line>
-      </g>
-    </svg>
-  </button>
-
   <footer class="status-bar" aria-live="polite" aria-atomic="true">
     <span id="status" class="status-text">${t(locale, 'status.ready')}</span>
     <span class="status-spacer"></span>
+    <span id="dof" class="status-text" style="margin-right: 12px;"></span>
     <span id="coords" class="status-text"></span>
     <span id="zoom" class="status-text status-zoom"></span>
   </footer>
-
-  <input id="file-input" type="file" hidden
-    accept=".pdf,.png,.jpg,.jpeg,.webp,application/pdf,image/png,image/jpeg,image/webp" />
-  <input id="project-input" type="file" hidden accept=".rasterfit.zip,application/zip" />
   `;
 }

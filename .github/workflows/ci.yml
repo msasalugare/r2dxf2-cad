@@ -65,11 +65,15 @@ jobs:
           done
           echo "healthcheck never became healthy"; exit 1
 
-      - name: Image size < 30 MB
+      - name: Image size < 800 MB (native FastAPI backend)
         run: |
           size=$(docker image inspect rasterfit:latest --format '{{.Size}}')
-          echo "image size: $size bytes"
-          test "$size" -lt 30000000
+          echo "image size: $size bytes ($((size / 1000000)) MB)"
+          # The runtime moved from a ~28 MB static nginx image to a ~320 MB
+          # python:3.12-slim + FastAPI + PyMuPDF/OpenCV/NumPy/scipy image.
+          # 800 MB guards against accidental bloat while leaving headroom for
+          # dependency updates.
+          test "$size" -lt 800000000
 
       - name: Install Playwright browser + deps
         run: |

@@ -1,9 +1,9 @@
 [workspace]
 resolver = "2"
-members = ["crates/rf-core", "crates/rf-wasm"]
+members = ["crates/rf-core", "crates/rf-wasm", "crates/rf-cli"]
 # Native-only default: keeps `cargo build` / `cargo test` on the host from
 # touching the wasm-bindgen crate (which targets wasm32-unknown-unknown).
-default-members = ["crates/rf-core"]
+default-members = ["crates/rf-core", "crates/rf-cli"]
 
 [workspace.package]
 version = "0.1.0"

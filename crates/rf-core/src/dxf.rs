@@ -1,8 +1,7 @@
 //! DXF export of the sketch (mm units, y-up).
 //!
-//! Emits ASCII DXF R12 `LINE` and `CIRCLE` entities on `geometry` /
-//! `construction` layers. Arcs are not exported yet (the sketch model has no
-//! arc parameters until M8). See `docs/FILE_FORMAT.md` and T14.
+//! Emits ASCII DXF R12 `LINE`, `CIRCLE`, and `ARC` entities on `geometry` /
+//! `construction` layers. See `docs/FILE_FORMAT.md` and T14.
 
 use std::fmt::Write;
 
@@ -46,6 +45,23 @@ pub fn export_dxf(sketch: &Sketch) -> String {
         group(&mut out, 40, fmt_num(circle.radius));
     }
 
+    for arc in &sketch.arcs {
+        let c = point(sketch, arc.center);
+        let layer = if arc.construction {
+            "construction"
+        } else {
+            "geometry"
+        };
+        group(&mut out, 0, "ARC");
+        group(&mut out, 8, layer);
+        group(&mut out, 10, fmt_num(c.x));
+        group(&mut out, 20, fmt_num(c.y));
+        group(&mut out, 30, "0");
+        group(&mut out, 40, fmt_num(arc.radius));
+        group(&mut out, 50, fmt_num(arc.start.to_degrees()));
+        group(&mut out, 51, fmt_num(arc.end.to_degrees()));
+    }
+
     out.push_str("0\nENDSEC\n0\nEOF\n");
     out
 }
@@ -82,7 +98,9 @@ fn fmt_num(v: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sketch::{CircleId, LineId, PointId, SketchCircle, SketchLine, SketchPoint};
+    use crate::sketch::{
+        ArcId, CircleId, LineId, PointId, SketchArc, SketchCircle, SketchLine, SketchPoint,
+    };
 
     fn p(id: u32, x: f64, y: f64) -> SketchPoint {
         SketchPoint {
@@ -116,7 +134,16 @@ mod tests {
                 radius: 12.5,
                 construction: false,
             }],
+            arcs: vec![SketchArc {
+                id: ArcId::new(20),
+                center: PointId::new(3),
+                radius: 25.0,
+                start: 0.0,
+                end: std::f64::consts::FRAC_PI_2,
+                construction: false,
+            }],
             constraints: vec![],
+            reference_constraints: vec![],
         };
 
         let dxf = export_dxf(&sketch);
@@ -124,6 +151,7 @@ mod tests {
 
         assert_eq!(entities.lines.len(), 2);
         assert_eq!(entities.circles.len(), 1);
+        assert_eq!(entities.arcs.len(), 1);
 
         // Line 1: (0,0) → (100,0) on geometry.
         assert_eq!(entities.lines[0].layer, "geometry");
@@ -139,12 +167,20 @@ mod tests {
         assert!((entities.circles[0].cx - 50.0).abs() < 1e-6);
         assert!((entities.circles[0].cy - 50.0).abs() < 1e-6);
         assert!((entities.circles[0].r - 12.5).abs() < 1e-6);
+
+        // Arc: centre (50,50), radius 25, 0° → 90°.
+        assert!((entities.arcs[0].cx - 50.0).abs() < 1e-6);
+        assert!((entities.arcs[0].cy - 50.0).abs() < 1e-6);
+        assert!((entities.arcs[0].r - 25.0).abs() < 1e-6);
+        assert!((entities.arcs[0].start_deg - 0.0).abs() < 1e-6);
+        assert!((entities.arcs[0].end_deg - 90.0).abs() < 1e-6);
     }
 
     /// Minimal ASCII-DXF entity parser for the round-trip test (dev only).
     struct Entities {
         lines: Vec<LineEntity>,
         circles: Vec<CircleEntity>,
+        arcs: Vec<ArcEntity>,
     }
 
     struct LineEntity {
@@ -162,9 +198,19 @@ mod tests {
         r: f64,
     }
 
+    struct ArcEntity {
+        layer: String,
+        cx: f64,
+        cy: f64,
+        r: f64,
+        start_deg: f64,
+        end_deg: f64,
+    }
+
     fn parse_entities(dxf: &str) -> Entities {
         let mut lines = Vec::new();
         let mut circles = Vec::new();
+        let mut arcs = Vec::new();
 
         let tokens: Vec<&str> = dxf.lines().map(|l| l.trim()).collect();
         let mut i = 0;
@@ -220,10 +266,41 @@ mod tests {
                     }
                     circles.push(e);
                 }
+                0 if value == "ARC" => {
+                    let mut e = ArcEntity {
+                        layer: String::new(),
+                        cx: 0.0,
+                        cy: 0.0,
+                        r: 0.0,
+                        start_deg: 0.0,
+                        end_deg: 0.0,
+                    };
+                    i += 2;
+                    while i + 1 < tokens.len() {
+                        let c: i32 = tokens[i].parse().unwrap_or(-1);
+                        let v = tokens[i + 1];
+                        match c {
+                            8 => e.layer = v.to_string(),
+                            10 => e.cx = v.parse().unwrap(),
+                            20 => e.cy = v.parse().unwrap(),
+                            40 => e.r = v.parse().unwrap(),
+                            50 => e.start_deg = v.parse().unwrap(),
+                            51 => e.end_deg = v.parse().unwrap(),
+                            0 => break,
+                            _ => {}
+                        }
+                        i += 2;
+                    }
+                    arcs.push(e);
+                }
                 _ => i += 2,
             }
         }
 
-        Entities { lines, circles }
+        Entities {
+            lines,
+            circles,
+            arcs,
+        }
     }
 }

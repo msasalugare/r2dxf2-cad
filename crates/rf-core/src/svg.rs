@@ -57,6 +57,34 @@ pub fn export_svg(sketch: &Sketch) -> String {
         );
     }
 
+    for arc in &sketch.arcs {
+        let c = point(sketch, arc.center);
+        let cls = if arc.construction {
+            "construction"
+        } else {
+            "geometry"
+        };
+        let x1 = c.x + arc.radius * arc.start.cos();
+        let y1 = svg_y(c.y + arc.radius * arc.start.sin(), max_y);
+        let x2 = c.x + arc.radius * arc.end.cos();
+        let y2 = svg_y(c.y + arc.radius * arc.end.sin(), max_y);
+        let sweep = (arc.end - arc.start).rem_euclid(std::f64::consts::TAU);
+        let large_arc = if sweep > std::f64::consts::PI { 1 } else { 0 };
+        // CCW in y-up becomes sweep-flag 0 in y-down SVG coordinates.
+        let _ = writeln!(
+            out,
+            r#"  <path class="{}" fill="none" d="M {} {} A {} {} 0 {} 0 {} {}"/>"#,
+            cls,
+            fmt_num(x1),
+            fmt_num(y1),
+            fmt_num(arc.radius),
+            fmt_num(arc.radius),
+            large_arc,
+            fmt_num(x2),
+            fmt_num(y2),
+        );
+    }
+
     out.push_str("</svg>\n");
     out
 }
@@ -93,6 +121,13 @@ fn bounds(sketch: &Sketch) -> (f64, f64, f64, f64) {
         max_x = max_x.max(center.x + c.radius);
         max_y = max_y.max(center.y + c.radius);
     }
+    for a in &sketch.arcs {
+        let center = point(sketch, a.center);
+        min_x = min_x.min(center.x - a.radius);
+        min_y = min_y.min(center.y - a.radius);
+        max_x = max_x.max(center.x + a.radius);
+        max_y = max_y.max(center.y + a.radius);
+    }
     if min_x.is_infinite() {
         (0.0, 0.0, 0.0, 0.0)
     } else {
@@ -116,10 +151,12 @@ fn fmt_num(v: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sketch::{CircleId, LineId, PointId, SketchCircle, SketchLine, SketchPoint};
+    use crate::sketch::{
+        ArcId, CircleId, LineId, PointId, SketchArc, SketchCircle, SketchLine, SketchPoint,
+    };
 
     #[test]
-    fn svg_contains_line_and_circle() {
+    fn svg_contains_line_circle_and_arc() {
         let sketch = Sketch {
             points: vec![
                 SketchPoint {
@@ -145,11 +182,21 @@ mod tests {
                 radius: 2.0,
                 construction: false,
             }],
+            arcs: vec![SketchArc {
+                id: ArcId::new(20),
+                center: PointId::new(1),
+                radius: 4.0,
+                start: 0.0,
+                end: 1.5,
+                construction: false,
+            }],
             constraints: vec![],
+            reference_constraints: vec![],
         };
         let svg = export_svg(&sketch);
         assert!(svg.contains("<line"));
         assert!(svg.contains("<circle"));
+        assert!(svg.contains("<path"));
         assert!(svg.contains("viewBox"));
         // The y-up world point (10,10) maps to y-down 0 (top) within the viewBox.
         assert!(svg.contains("y2=\"0\""));

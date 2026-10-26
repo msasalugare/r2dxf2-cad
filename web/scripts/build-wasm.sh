@@ -5,7 +5,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
 
-cargo build --release --target wasm32-unknown-unknown -p rf-wasm
+RUSTFLAGS="${RUSTFLAGS:--C target-feature=+simd128}" \
+  cargo build --release --target wasm32-unknown-unknown -p rf-wasm
 
 mkdir -p web/public/wasm
 wasm-bindgen \

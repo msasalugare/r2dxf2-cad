@@ -124,9 +124,12 @@ worker.onmessage = async (e) => {
   if (req.type === 'get-gray') {
     const buf = grayBuffers.get(req.pageIndex);
     if (buf) {
+      // Transfer a cloned buffer so `grayBuffers` retains the master copy for
+      // subsequent ridge/fit/snap requests on the same page.
+      const copy = new Uint8Array(buf.data);
       worker.postMessage(
-        { id: req.id, ok: true, gray: buf.data, width: buf.width, height: buf.height },
-        [buf.data.buffer],
+        { id: req.id, ok: true, gray: copy, width: buf.width, height: buf.height },
+        [copy.buffer],
       );
     } else {
       worker.postMessage({ id: req.id, ok: false, error: 'gray buffer unavailable' });

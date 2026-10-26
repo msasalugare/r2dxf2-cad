@@ -12,7 +12,6 @@
 // and then the pan/zoom camera.
 
 import {
-  bestLevel,
   clampZoom,
   fitCamera,
   panBy,
@@ -22,13 +21,17 @@ import {
 } from './camera';
 import { TILE_SIZE, tileHeight, tileIndex, tileWidth, type RasterPage } from './raster';
 
-const GRID_SPACING = 24; // CSS px, mirrors --geometry-viewer-grid-spacing
-const DOT_RADIUS = 1;
-
 /** Affine as Canvas 2D coefficients: `[a, b, c, d, e, f]`. */
 export type Affine = [number, number, number, number, number, number];
 
 const IDENTITY: Affine = [1, 0, 0, 1, 0, 0];
+
+export interface RasterDisplayOptions {
+  opacity: number;
+  invert: boolean;
+  contrast: number;
+  visible?: boolean;
+}
 
 function cssVar(el: Element, name: string, fallback: string): string {
   return getComputedStyle(el).getPropertyValue(name).trim() || fallback;
@@ -38,10 +41,16 @@ export class RasterViewer {
   private camera: Camera = { zoom: 1, x: 0, y: 0 };
   private page: RasterPage | null = null;
   private rasterTransform: Affine = IDENTITY;
+  private worldScale: { sx: number; sy: number } = { sx: 1, sy: 1 };
+  private displayOpts: RasterDisplayOptions = { opacity: 0.72, invert: false, contrast: 1, visible: true };
+  private gridSnapEnabled = false;
+  private gridStep = 10;
+  private customOrigin: { x: number; y: number } | null = null;
   private raf = 0;
   private dragPointer: number | null = null;
   private dragHookActive = false;
   private panPointer: number | null = null;
+  private downPos: { x: number; y: number; altKey: boolean; moved: boolean } | null = null;
   private lastX = 0;
   private lastY = 0;
   private pointers = new Map<number, { x: number; y: number }>();
@@ -51,8 +60,14 @@ export class RasterViewer {
   onCameraChange: (() => void) | null = null;
   /** Called after the raster layer, in CSS-px space, for overlays. */
   onOverlay: ((ctx: CanvasRenderingContext2D, w: number, h: number) => void) | null = null;
-  /** If set and returns true, a pointer press is consumed as a click (no pan). */
-  onClick: ((clientX: number, clientY: number) => boolean) | null = null;
+  /** If set and returns true, a click (pointerdown+up within 5 px) is consumed. */
+  onClick: ((clientX: number, clientY: number, altKey?: boolean) => boolean) | null = null;
+  /** Called on double-click on the canvas (e.g. to finish a polyline/polygon). */
+  onDoubleClick: ((clientX: number, clientY: number) => boolean) | null = null;
+  /** Called on right-click on the canvas (e.g. to finish/cancel a pending chain). */
+  onContextMenu: ((clientX: number, clientY: number) => boolean) | null = null;
+  /** Called on pointer move over the canvas for live tool previews. */
+  onPointerHover: ((clientX: number, clientY: number, altKey: boolean) => void) | null = null;
   /** If set and returns true on `start`, the drag is consumed as a tool stroke. */
   onDrag: ((clientX: number, clientY: number, phase: 'start' | 'move' | 'end') => boolean) | null = null;
 
@@ -62,12 +77,18 @@ export class RasterViewer {
     this.canvas.addEventListener('pointermove', this.onPointerMove);
     this.canvas.addEventListener('pointerup', this.onPointerUp);
     this.canvas.addEventListener('pointercancel', this.onPointerUp);
+    this.canvas.addEventListener('dblclick', this.onDblClick);
+    this.canvas.addEventListener('contextmenu', this.onCtxMenu);
     window.addEventListener('resize', this.scheduleRender);
     this.scheduleRender();
   }
 
   getCamera(): Camera {
     return this.camera;
+  }
+
+  getPage(): RasterPage | null {
+    return this.page;
   }
 
   getRasterTransform(): Affine {
@@ -82,15 +103,113 @@ export class RasterViewer {
 
   resetRasterTransform(): void {
     this.rasterTransform = IDENTITY;
+    this.worldScale = { sx: 1, sy: 1 };
     this.scheduleRender();
     this.onCameraChange?.();
+  }
+
+  getWorldScale(): { sx: number; sy: number } {
+    return { ...this.worldScale };
+  }
+
+  setWorldScale(sx: number, sy: number): void {
+    this.worldScale = { sx: sx > 0 ? sx : 1, sy: sy > 0 ? sy : 1 };
+    this.onCameraChange?.();
+  }
+
+  getDisplayOptions(): RasterDisplayOptions {
+    return { ...this.displayOpts };
+  }
+
+  setDisplayOptions(opts: Partial<RasterDisplayOptions>): void {
+    this.displayOpts = { ...this.displayOpts, ...opts };
+    this.scheduleRender();
+  }
+
+  isGridSnapEnabled(): boolean {
+    return this.gridSnapEnabled;
+  }
+
+  setGridSnapEnabled(enabled: boolean): void {
+    this.gridSnapEnabled = enabled;
+    this.scheduleRender();
+  }
+
+  getGridStep(): number {
+    return this.gridStep;
+  }
+
+  setGridStep(step: number): void {
+    if (step > 0) {
+      this.gridStep = step;
+      this.scheduleRender();
+    }
+  }
+
+  /**
+   * Origin `(x, y)` in raster/sketch coordinate space.
+   * Defaults to the bottom-left corner of the raster `(0, H)` when a raster is loaded,
+   * or a user-positioned custom origin when moved.
+   */
+  getOrigin(): { x: number; y: number } {
+    if (this.customOrigin) {
+      return { x: this.customOrigin.x, y: this.customOrigin.y };
+    }
+    if (this.page) {
+      return { x: 0, y: this.page.meta.height };
+    }
+    return { x: 80, y: Math.max(200, (this.viewHeight() || 720) - 80) };
+  }
+
+  /** Move the coordinate system `(0, 0)` to raster coordinates `(rx, ry)`. */
+  setOrigin(rx: number, ry: number): void {
+    this.customOrigin = { x: rx, y: ry };
+    this.scheduleRender();
+    this.onCameraChange?.();
+  }
+
+  /** Reset the coordinate system `(0, 0)` back to the bottom-left corner of the raster. */
+  resetOrigin(): void {
+    this.customOrigin = null;
+    this.scheduleRender();
+    this.onCameraChange?.();
+  }
+
+  /** Snap a coordinate `(x, y)` to the CAD grid around the origin if grid snap is active. */
+  snapToGrid(x: number, y: number): { x: number; y: number } {
+    if (!this.gridSnapEnabled) return { x, y };
+    const orig = this.getOrigin();
+    const stepX = this.gridStep / (this.worldScale.sx || 1);
+    const stepY = this.gridStep / (this.worldScale.sy || 1);
+    return {
+      x: orig.x + Math.round((x - orig.x) / stepX) * stepX,
+      y: orig.y + Math.round((y - orig.y) / stepY) * stepY,
+    };
+  }
+
+  /** Rotate and translate the background around the page center by `(dTheta, dx, dy)`. */
+  applyFitDelta(dTheta: number, dx: number, dy: number): void {
+    const t = this.rasterTransform;
+    const c = Math.cos(-dTheta);
+    const s = Math.sin(-dTheta);
+    const next: Affine = [
+      c * t[0] - s * t[1],
+      s * t[0] + c * t[1],
+      c * t[2] - s * t[3],
+      s * t[2] + c * t[3],
+      c * t[4] - s * t[5] - dx,
+      s * t[4] + c * t[5] - dy,
+    ];
+    this.setRasterTransform(next);
   }
 
   setPage(page: RasterPage | null): void {
     this.page = page;
     this.rasterTransform = IDENTITY;
+    this.customOrigin = null;
     if (page) {
-      this.camera = fitCamera(this.viewWidth(), this.viewHeight(), page.meta.width, page.meta.height, 12);
+      // Occupy 100% of the workspace on open (padding = 0).
+      this.camera = fitCamera(this.viewWidth(), this.viewHeight(), page.meta.width, page.meta.height, 0);
     }
     this.scheduleRender();
     this.onCameraChange?.();
@@ -108,19 +227,70 @@ export class RasterViewer {
     this.scheduleRender();
   }
 
-  /** Fit the current page (in world space) into the viewport. */
+  /** Fit the current page (in world space) into 100% of the viewport. */
   fit(): void {
-    if (!this.page) return;
+    if (!this.page) {
+      this.camera = { zoom: 1, x: 0, y: 0 };
+      this.scheduleRender();
+      this.onCameraChange?.();
+      return;
+    }
     const bounds = this.worldBounds();
-    this.camera = fitCamera(this.viewWidth(), this.viewHeight(), bounds.width, bounds.height, 12);
+    const cam = fitCamera(this.viewWidth(), this.viewHeight(), bounds.width, bounds.height, 0);
+    this.camera = {
+      zoom: cam.zoom,
+      x: cam.x - bounds.minX * cam.zoom,
+      y: cam.y - bounds.minY * cam.zoom,
+    };
     this.scheduleRender();
     this.onCameraChange?.();
   }
 
-  /** World coordinates (post-transform) under a client point. */
+  /** World coordinates (relative to `(0,0)` origin, y-up, scaled by `worldScale` mm/px) under a client point. */
   clientToWorld(clientX: number, clientY: number): { x: number; y: number } {
+    const r = this.clientToRaster(clientX, clientY);
+    const orig = this.getOrigin();
+    if (r) {
+      return {
+        x: (r.x - orig.x) * this.worldScale.sx,
+        y: (orig.y - r.y) * this.worldScale.sy,
+      };
+    }
     const rect = this.canvas.getBoundingClientRect();
-    return screenToWorld(this.camera, clientX - rect.left, clientY - rect.top);
+    const w = screenToWorld(this.camera, clientX - rect.left, clientY - rect.top);
+    return {
+      x: (w.x - orig.x) * this.worldScale.sx,
+      y: (orig.y - w.y) * this.worldScale.sy,
+    };
+  }
+
+  /** Convert raster coordinates `(rx, ry)` to CAD world coordinates `(X, Y)` relative to `(0, 0)`. */
+  rasterToWorld(rx: number, ry: number): { x: number; y: number } {
+    const orig = this.getOrigin();
+    return {
+      x: (rx - orig.x) * this.worldScale.sx,
+      y: (orig.y - ry) * this.worldScale.sy,
+    };
+  }
+
+  /** Convert CAD world coordinates `(X, Y)` relative to `(0, 0)` back to raster coordinates `(rx, ry)`. */
+  worldToRaster(wx: number, wy: number): { x: number; y: number } {
+    const orig = this.getOrigin();
+    return {
+      x: orig.x + wx / (this.worldScale.sx || 1),
+      y: orig.y - wy / (this.worldScale.sy || 1),
+    };
+  }
+
+  /** Combined raster→screen affine `[a, b, c, d, e, f]`. */
+  getCombinedTransform(): Affine {
+    return this.combined();
+  }
+
+  /** Effective screen-pixels-per-raster-pixel zoom factor (including `rasterTransform`). */
+  getEffectiveZoom(): number {
+    const m = this.combined();
+    return Math.hypot(m[0], m[1]) || this.camera.zoom;
   }
 
   /** Raster coordinates (pre-transform) under a client point, or null if singular. */
@@ -144,6 +314,8 @@ export class RasterViewer {
     this.canvas.removeEventListener('pointermove', this.onPointerMove);
     this.canvas.removeEventListener('pointerup', this.onPointerUp);
     this.canvas.removeEventListener('pointercancel', this.onPointerUp);
+    this.canvas.removeEventListener('dblclick', this.onDblClick);
+    this.canvas.removeEventListener('contextmenu', this.onCtxMenu);
     window.removeEventListener('resize', this.scheduleRender);
     if (this.raf) cancelAnimationFrame(this.raf);
   }
@@ -163,7 +335,7 @@ export class RasterViewer {
     return [z * t[0], z * t[1], z * t[2], z * t[3], z * t[4] + this.camera.x, z * t[5] + this.camera.y];
   }
 
-  private screenToRaster(sx: number, sy: number): { x: number; y: number } | null {
+  screenToRaster(sx: number, sy: number): { x: number; y: number } | null {
     const m = this.combined();
     const det = m[0] * m[3] - m[2] * m[1];
     if (Math.abs(det) < 1e-12) return null;
@@ -175,10 +347,10 @@ export class RasterViewer {
     };
   }
 
-  /** World-space bounding box of the raster (width/height in world units). */
-  private worldBounds(): { width: number; height: number } {
+  /** World-space bounding box of the raster (minX, minY, width, height in post-transform units). */
+  private worldBounds(): { minX: number; minY: number; width: number; height: number } {
     const page = this.page;
-    if (!page) return { width: 1, height: 1 };
+    if (!page) return { minX: 0, minY: 0, width: 1, height: 1 };
     const t = this.rasterTransform;
     const W = page.meta.width;
     const H = page.meta.height;
@@ -200,7 +372,7 @@ export class RasterViewer {
       maxX = Math.max(maxX, x);
       maxY = Math.max(maxY, y);
     }
-    return { width: maxX - minX, height: maxY - minY };
+    return { minX, minY, width: Math.max(1, maxX - minX), height: Math.max(1, maxY - minY) };
   }
 
   private onWheel = (e: WheelEvent): void => {
@@ -215,6 +387,18 @@ export class RasterViewer {
     this.onCameraChange?.();
   };
 
+  private onDblClick = (e: MouseEvent): void => {
+    if (this.onDoubleClick?.(e.clientX, e.clientY)) {
+      e.preventDefault();
+    }
+  };
+
+  private onCtxMenu = (e: MouseEvent): void => {
+    if (this.onContextMenu?.(e.clientX, e.clientY)) {
+      e.preventDefault();
+    }
+  };
+
   private onPointerDown = (e: PointerEvent): void => {
     this.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
     this.canvas.setPointerCapture(e.pointerId);
@@ -224,29 +408,33 @@ export class RasterViewer {
       this.panPointer = e.pointerId;
       this.lastX = e.clientX;
       this.lastY = e.clientY;
+      this.downPos = null;
       return;
     }
     if (e.button !== 0) return;
 
     // A second finger starts a pinch (zoom + pan).
     if (this.pointers.size >= 2) {
+      this.downPos = null;
       this.startPinch();
       return;
     }
 
-    if (this.onClick?.(e.clientX, e.clientY)) return;
     if (this.onDrag?.(e.clientX, e.clientY, 'start')) {
       this.dragHookActive = true;
       this.dragPointer = e.pointerId;
+      this.downPos = null;
       return;
     }
     this.panPointer = e.pointerId;
     this.lastX = e.clientX;
     this.lastY = e.clientY;
+    this.downPos = { x: e.clientX, y: e.clientY, altKey: e.altKey, moved: false };
   };
 
   private onPointerMove = (e: PointerEvent): void => {
     this.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    this.onPointerHover?.(e.clientX, e.clientY, e.altKey);
 
     if (this.pinchStart && this.pointers.size >= 2) {
       this.updatePinch();
@@ -254,11 +442,25 @@ export class RasterViewer {
     }
 
     if (this.dragHookActive && this.dragPointer === e.pointerId) {
-      this.onDrag?.(e.clientX, e.clientY, 'move');
+      const coalesced = typeof e.getCoalescedEvents === 'function' ? e.getCoalescedEvents() : [e];
+      if (coalesced.length > 0) {
+        for (const ev of coalesced) {
+          this.onDrag?.(ev.clientX, ev.clientY, 'move');
+        }
+      } else {
+        this.onDrag?.(e.clientX, e.clientY, 'move');
+      }
       return;
     }
 
     if (this.panPointer === e.pointerId) {
+      if (this.downPos && !this.downPos.moved) {
+        if (Math.hypot(e.clientX - this.downPos.x, e.clientY - this.downPos.y) > 5) {
+          this.downPos.moved = true;
+        } else {
+          return;
+        }
+      }
       const dx = e.clientX - this.lastX;
       const dy = e.clientY - this.lastY;
       this.lastX = e.clientX;
@@ -279,6 +481,10 @@ export class RasterViewer {
     }
     if (this.panPointer === e.pointerId) {
       this.panPointer = null;
+      if (this.downPos && !this.downPos.moved && e.type === 'pointerup') {
+        this.onClick?.(e.clientX, e.clientY, this.downPos.altKey);
+      }
+      this.downPos = null;
     }
     if (this.pointers.size < 2) {
       this.pinchStart = null;
@@ -347,35 +553,144 @@ export class RasterViewer {
 
     ctx.fillStyle = cssVar(this.canvas, '--color-surface-viewer', '#eceef0');
     ctx.fillRect(0, 0, w, h);
-    this.drawGrid(ctx, w, h);
-    if (this.page) this.drawRaster(ctx, w, h);
+    if (this.page && this.displayOpts.visible !== false) this.drawRaster(ctx, w, h);
+    if (!this.page || this.gridSnapEnabled) this.drawGrid(ctx, w, h);
+    this.drawOriginAxes(ctx, w, h);
     this.onOverlay?.(ctx, w, h);
   };
 
   private drawGrid(ctx: CanvasRenderingContext2D, w: number, h: number): void {
-    ctx.fillStyle = cssVar(this.canvas, '--color-viewer-grid-dot', '#d3d7dc');
-    for (let x = GRID_SPACING / 2; x < w; x += GRID_SPACING) {
-      for (let y = GRID_SPACING / 2; y < h; y += GRID_SPACING) {
-        ctx.beginPath();
-        ctx.arc(x, y, DOT_RADIUS, 0, Math.PI * 2);
-        ctx.fill();
-      }
+    const z = this.getEffectiveZoom();
+    const orig = this.getOrigin();
+    const origScreen = this.rasterToScreen(orig.x, orig.y);
+
+    // Adaptive CAD grid spacing so grid lines are always ~20..100 CSS px apart
+    const baseStep = (this.gridStep || 10) / (this.worldScale.sx || 1);
+    let minorStepWorld = baseStep;
+    while (minorStepWorld * z < 18) minorStepWorld *= 2;
+    while (minorStepWorld * z > 90) minorStepWorld /= 2;
+    const minorPx = minorStepWorld * z;
+    const majorEvery = 5;
+
+    ctx.save();
+    const isDark = document.documentElement.dataset.theme === 'dark';
+    const minorColor = isDark ? 'rgba(148, 163, 184, 0.12)' : 'rgba(100, 116, 139, 0.14)';
+    const majorColor = isDark ? 'rgba(148, 163, 184, 0.26)' : 'rgba(100, 116, 139, 0.28)';
+
+    // Vertical grid lines
+    const startIdxX = Math.floor(-origScreen.x / minorPx);
+    const endIdxX = Math.ceil((w - origScreen.x) / minorPx);
+    for (let i = startIdxX; i <= endIdxX; i += 1) {
+      if (i === 0) continue;
+      const sx = origScreen.x + i * minorPx;
+      ctx.strokeStyle = i % majorEvery === 0 ? majorColor : minorColor;
+      ctx.lineWidth = i % majorEvery === 0 ? 1 : 0.75;
+      ctx.beginPath();
+      ctx.moveTo(sx, 0);
+      ctx.lineTo(sx, h);
+      ctx.stroke();
     }
+
+    // Horizontal grid lines
+    const startIdxY = Math.floor(-origScreen.y / minorPx);
+    const endIdxY = Math.ceil((h - origScreen.y) / minorPx);
+    for (let j = startIdxY; j <= endIdxY; j += 1) {
+      if (j === 0) continue;
+      const sy = origScreen.y + j * minorPx;
+      ctx.strokeStyle = j % majorEvery === 0 ? majorColor : minorColor;
+      ctx.lineWidth = j % majorEvery === 0 ? 1 : 0.75;
+      ctx.beginPath();
+      ctx.moveTo(0, sy);
+      ctx.lineTo(w, sy);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  private drawOriginAxes(ctx: CanvasRenderingContext2D, w: number, h: number): void {
+    const orig = this.getOrigin();
+    const origScreen = this.rasterToScreen(orig.x, orig.y);
+    const xDirScreen = this.rasterToScreen(orig.x + 100, orig.y);
+    const yDirScreen = this.rasterToScreen(orig.x, orig.y - 100);
+    const uxX = xDirScreen.x - origScreen.x;
+    const uxY = xDirScreen.y - origScreen.y;
+    const lenX = Math.hypot(uxX, uxY) || 1;
+    const uyX = yDirScreen.x - origScreen.x;
+    const uyY = yDirScreen.y - origScreen.y;
+    const lenY = Math.hypot(uyX, uyY) || 1;
+
+    ctx.save();
+    // Dashed full-canvas axis lines through (0, 0)
+    ctx.setLineDash([6, 4]);
+    ctx.strokeStyle = 'rgba(224, 49, 49, 0.55)';
+    ctx.lineWidth = 1.25;
+    ctx.beginPath();
+    ctx.moveTo(origScreen.x - (uxX / lenX) * Math.max(w, h) * 2, origScreen.y - (uxY / lenX) * Math.max(w, h) * 2);
+    ctx.lineTo(origScreen.x + (uxX / lenX) * Math.max(w, h) * 2, origScreen.y + (uxY / lenX) * Math.max(w, h) * 2);
+    ctx.stroke();
+
+    ctx.strokeStyle = 'rgba(47, 158, 68, 0.55)';
+    ctx.lineWidth = 1.25;
+    ctx.beginPath();
+    ctx.moveTo(origScreen.x - (uyX / lenY) * Math.max(w, h) * 2, origScreen.y - (uyY / lenY) * Math.max(w, h) * 2);
+    ctx.lineTo(origScreen.x + (uyX / lenY) * Math.max(w, h) * 2, origScreen.y + (uyY / lenY) * Math.max(w, h) * 2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // Solid positive X (red) and Y (green) arrows at (0, 0)
+    const arrowLen = 56;
+    const xEnd = { x: origScreen.x + (uxX / lenX) * arrowLen, y: origScreen.y + (uxY / lenX) * arrowLen };
+    const yEnd = { x: origScreen.x + (uyX / lenY) * arrowLen, y: origScreen.y + (uyY / lenY) * arrowLen };
+
+    ctx.strokeStyle = '#e03131';
+    ctx.lineWidth = 2.25;
+    ctx.beginPath();
+    ctx.moveTo(origScreen.x, origScreen.y);
+    ctx.lineTo(xEnd.x, xEnd.y);
+    ctx.stroke();
+
+    ctx.strokeStyle = '#2f9e44';
+    ctx.lineWidth = 2.25;
+    ctx.beginPath();
+    ctx.moveTo(origScreen.x, origScreen.y);
+    ctx.lineTo(yEnd.x, yEnd.y);
+    ctx.stroke();
+
+    // Origin (0,0) bullseye & X/Y axis labels
+    ctx.fillStyle = '#ffffff';
+    ctx.strokeStyle = '#e03131';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(origScreen.x, origScreen.y, 6, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(origScreen.x, origScreen.y, 2, 0, Math.PI * 2);
+    ctx.fillStyle = '#e03131';
+    ctx.fill();
+
+    ctx.font = 'bold 11px Arial, sans-serif';
+    ctx.fillStyle = '#e03131';
+    ctx.fillText('+X', xEnd.x + 4, xEnd.y - 4);
+    ctx.fillStyle = '#2f9e44';
+    ctx.fillText('+Y', yEnd.x + 5, yEnd.y + 4);
+    ctx.fillStyle = '#1e293b';
+    ctx.fillText('(0,0)', origScreen.x + 8, origScreen.y + 14);
+
+    ctx.restore();
   }
 
   private drawRaster(ctx: CanvasRenderingContext2D, w: number, h: number): void {
     const page = this.page;
-    if (!page) return;
+    if (!page || page.levels.length === 0) return;
 
     const m = this.combined();
     const det = m[0] * m[3] - m[2] * m[1];
     if (Math.abs(det) < 1e-12) return;
 
-    // Choose the pyramid level so raster pixels ≈ screen pixels.
-    const t = this.rasterTransform;
-    const rasterZoom =
-      this.camera.zoom * Math.max(Math.hypot(t[0], t[1]), Math.hypot(t[2], t[3]));
-    const level = page.levels[bestLevel(rasterZoom, page.levels.length - 1)];
+    // Always draw from level 0 (exact 1:1 full-resolution raster coordinates)
+    // so there is zero pyramid-level rounding or scale shift during zoom in/out.
+    const level = page.levels[0];
 
     // Raster-space bounding box of the visible screen rectangle.
     let minU = Infinity;
@@ -405,10 +720,19 @@ export class RasterViewer {
 
     const col0 = Math.floor(minU / TILE_SIZE);
     const row0 = Math.floor(minV / TILE_SIZE);
-    const col1 = Math.min(level.tileCols - 1, Math.floor((maxU - 1) / TILE_SIZE));
-    const row1 = Math.min(level.tileRows - 1, Math.floor((maxV - 1) / TILE_SIZE));
+    const col1 = Math.min(level.tileCols - 1, Math.floor(Math.max(0, maxU - 1e-6) / TILE_SIZE));
+    const row1 = Math.min(level.tileRows - 1, Math.floor(Math.max(0, maxV - 1e-6) / TILE_SIZE));
 
     ctx.save();
+    ctx.globalAlpha = Math.max(0, Math.min(1, this.displayOpts.opacity));
+    const filters: string[] = [];
+    if (this.displayOpts.invert) filters.push('invert(1)');
+    if (Math.abs(this.displayOpts.contrast - 1) > 0.01) {
+      filters.push(`contrast(${Math.round(this.displayOpts.contrast * 100)}%)`);
+    }
+    if (filters.length > 0) {
+      ctx.filter = filters.join(' ');
+    }
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = 'high';
     ctx.transform(m[0], m[1], m[2], m[3], m[4], m[5]);

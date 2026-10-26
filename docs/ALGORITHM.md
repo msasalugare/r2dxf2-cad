@@ -35,9 +35,33 @@ fitter stages (spec sections 6–10). Sections are filled as their milestones la
 
 ## 9. Sketch & constraints (M5)
 
-- Constraint residual functions + analytic Jacobian (or dual-number autodiff).
+- Constraint residual functions + analytic Jacobian via forward-mode
+  dual-number autodiff.
 - DoF via rank of `Jc` (QR/SVD with tolerance); redundant/conflicting set
   identification.
+
+### Tangent constraints (arc ↔ line, arc ↔ arc)
+
+Tangency is defined on the supporting circles so the residual is smooth and
+side-stable (the solver keeps the side the initial geometry sits on):
+
+- **Line–arc** (`TangentLineArc`): `distance(arc.center, line) − radius = 0`.
+  With a shared endpoint (shared `PointId` + `PointOnArc`), the line touches
+  the arc exactly at that endpoint.
+- **Arc–arc** (`TangentArcArc`): `‖c₁ − c₂‖ − (r₁ + r₂) = 0` (external
+  tangency). With a shared endpoint + `PointOnArc` on both arcs, the two arcs
+  meet smoothly at the shared point (the two radii are collinear and opposite).
+- **Line–circle / circle–circle** use the same supporting-circle formulation
+  (`distance(center, line) = radius`, `‖c₁ − c₂‖ = r₁ + r₂`).
+
+### Connection-point continuity
+
+The polyline reuses the previous segment's end point as the next segment's
+start point (a shared `PointId`), so joints never split. Arc endpoints carry
+`startPt`/`endPt` plus `PointOnArc` constraints; after every solve,
+`syncArcsWithEndpoints` re-projects the endpoints onto the arc circle and
+recomputes `start`/`end` from the (possibly moved) endpoint vertices, keeping
+the chain continuous.
 
 ## 10. Solver & fitter (M6)
 
@@ -49,3 +73,30 @@ fitter stages (spec sections 6–10). Sections are filled as their milestones la
   merit-function acceptance, final Newton projection to `‖c‖∞ < 1e-9 mm`.
 - Pyramid phases: (1) T only (ICP/Umeyama), (2) q only, (3) joint until
   `max step < 0.02 px` and `ΔE/E < 1e-4`.
+
+## 11. Sketch interaction model
+
+### Polyline (`P`) M-key modes
+
+`M` cycles the segment mode for the next segment:
+
+- `line` — free line (auto H/V when enabled and no raster is loaded).
+- `perp` — line perpendicular to the previous segment (`Perpendicular`, or
+  `PerpendicularLineArc` after an arc).
+- `tangent` — line tangent to the previous segment (`Collinear` after a line,
+  `TangentLineArc` after an arc).
+- `arc` — arc tangent to the previous segment (`TangentLineArc` after a line,
+  `TangentArcArc` after an arc); effectively free when it is the first segment.
+- `arc-free` — free arc (no tangency constraint; generic chord-perpendicular
+  center guess).
+
+### Selection / move / delete
+
+- **Select (`V`)**: click a vertex/edge to toggle selection; drag empty space
+  for a box (left→right = window, right→left = crossing). Selected entities
+  render cyan.
+- **Move**: drag a selected vertex (or an edge's endpoints) to move it; a
+  coincident cluster moves together and the solver re-solves live so
+  constraints hold during the drag. `Ctrl+Z` / `Ctrl+Y` undo/redo.
+- **Delete**: `Delete` / `Backspace` removes the selected entities and every
+  constraint that references them (`pruneOrphanConstraints`), then re-solves.

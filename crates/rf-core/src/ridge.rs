@@ -9,11 +9,19 @@
 //! 4. sub-pixel quadratic interpolation across the profile (Taylor step along
 //!    the normal), plus the local tangent direction and strength.
 //!
-//! This module is pure Rust and testable natively; tile-ization/caching and the
-//! WASM bridge are added once the ridge is consumed by the browser.
+//! Memory discipline (`Prompt.txt` §2, §7): large rasters are processed in tiles
+//! (`TILE_SIZE = 512`) with a halo (`background_radius + 3·σ_max + 2`), using
+//! `f32` buffers per tile and `f64` for Hessian/sub-pixel math, optionally
+//! restricted to a bounding box (`Roi`). A spatial grid index (`RidgeIndex`)
+//! accelerates nearest-centerline queries in the fitter.
 
-use crate::geometry::normalize_angle;
+use std::collections::HashMap;
+
+use crate::geometry::{normalize_angle, Point};
 use serde::{Deserialize, Serialize};
+
+/// Tile size (interior pixels) used for bounded-memory ridge detection.
+pub const RIDGE_TILE_SIZE: usize = 512;
 
 /// Ridge detection parameters.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -36,6 +44,15 @@ impl Default for RidgeParams {
     }
 }
 
+/// Region of interest in raster pixel coordinates `[x0, y0, x1, y1)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Roi {
+    pub x0: usize,
+    pub y0: usize,
+    pub x1: usize,
+    pub y1: usize,
+}
+
 /// A detected ridge point in raster coordinates (pixels, y-down, pixel centres
 /// at `(i + 0.5, j + 0.5)`).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -50,6 +67,58 @@ pub struct RidgePoint {
     pub scale: f64,
 }
 
+/// Spatial grid-hash index over ridge points for fast `O(1)` radius queries.
+pub struct RidgeIndex<'a> {
+    points: &'a [RidgePoint],
+    cell_size: f64,
+    cells: HashMap<(i64, i64), Vec<usize>>,
+}
+
+impl<'a> RidgeIndex<'a> {
+    pub fn new(points: &'a [RidgePoint], cell_size: f64) -> Self {
+        let cs = cell_size.max(1.0);
+        let mut cells: HashMap<(i64, i64), Vec<usize>> = HashMap::new();
+        for (idx, p) in points.iter().enumerate() {
+            let cx = (p.x / cs).floor() as i64;
+            let cy = (p.y / cs).floor() as i64;
+            cells.entry((cx, cy)).or_default().push(idx);
+        }
+        Self {
+            points,
+            cell_size: cs,
+            cells,
+        }
+    }
+
+    /// Find the nearest ridge point to `(x, y)` within `max_radius` pixels.
+    pub fn nearest(&self, x: f64, y: f64, max_radius: f64) -> Option<&'a RidgePoint> {
+        if self.points.is_empty() || max_radius <= 0.0 {
+            return None;
+        }
+        let span = (max_radius / self.cell_size).ceil() as i64;
+        let cx0 = (x / self.cell_size).floor() as i64;
+        let cy0 = (y / self.cell_size).floor() as i64;
+        let mut best_d2 = max_radius * max_radius;
+        let mut best_idx: Option<usize> = None;
+
+        for dy in -span..=span {
+            for dx in -span..=span {
+                if let Some(bucket) = self.cells.get(&(cx0 + dx, cy0 + dy)) {
+                    for &idx in bucket {
+                        let p = &self.points[idx];
+                        let d2 = (p.x - x).powi(2) + (p.y - y).powi(2);
+                        if d2 <= best_d2 {
+                            best_d2 = d2;
+                            best_idx = Some(idx);
+                        }
+                    }
+                }
+            }
+        }
+        best_idx.map(|i| &self.points[i])
+    }
+}
+
 /// Detect ridge points in a gray8 image (`0` = dark, `255` = white).
 pub fn detect_ridges(
     gray: &[u8],
@@ -57,37 +126,142 @@ pub fn detect_ridges(
     height: usize,
     params: &RidgeParams,
 ) -> Vec<RidgePoint> {
+    let roi = Roi {
+        x0: 0,
+        y0: 0,
+        x1: width,
+        y1: height,
+    };
+    detect_ridges_roi(gray, width, height, roi, params)
+}
+
+/// Detect ridge points within a bounding box `roi`, tiled with a halo so peak
+/// memory is bounded regardless of full raster resolution.
+pub fn detect_ridges_roi(
+    gray: &[u8],
+    width: usize,
+    height: usize,
+    roi: Roi,
+    params: &RidgeParams,
+) -> Vec<RidgePoint> {
     if width < 3 || height < 3 || gray.len() != width * height {
         return Vec::new();
     }
-
-    let darkness = compute_darkness(gray, width, height, params.background_radius);
-    let mut candidates: Vec<Candidate> = Vec::new();
-
-    for &sigma in &params.scales {
-        if sigma <= 0.0 {
-            continue;
-        }
-        let smoothed = gaussian_blur(&darkness, width, height, sigma);
-        let scale_candidates = ridge_at_scale(&smoothed, width, height, sigma, params.min_strength);
-        candidates.extend(scale_candidates);
+    let rx0 = roi.x0.min(width);
+    let ry0 = roi.y0.min(height);
+    let rx1 = roi.x1.min(width);
+    let ry1 = roi.y1.min(height);
+    if rx1 <= rx0 || ry1 <= ry0 {
+        return Vec::new();
     }
 
-    merge_candidates(candidates)
+    let max_sigma = params.scales.iter().copied().fold(0.0_f64, f64::max);
+    let gauss_halo = (3.0 * max_sigma).ceil() as usize;
+    let halo = params.background_radius + gauss_halo + 2;
+
+    let mut all_candidates: Vec<Candidate> = Vec::new();
+
+    let mut ty0 = ry0;
+    while ty0 < ry1 {
+        let ty1 = (ty0 + RIDGE_TILE_SIZE).min(ry1);
+        let mut tx0 = rx0;
+        while tx0 < rx1 {
+            let tx1 = (tx0 + RIDGE_TILE_SIZE).min(rx1);
+
+            // Tile window with halo clamped to image bounds.
+            let wx0 = tx0.saturating_sub(halo);
+            let wy0 = ty0.saturating_sub(halo);
+            let wx1 = (tx1 + halo).min(width);
+            let wy1 = (ty1 + halo).min(height);
+            let ww = wx1 - wx0;
+            let wh = wy1 - wy0;
+
+            if ww >= 3 && wh >= 3 {
+                let mut tile_gray = vec![0u8; ww * wh];
+                for y in 0..wh {
+                    let src_row = (wy0 + y) * width + wx0;
+                    tile_gray[y * ww..(y + 1) * ww].copy_from_slice(&gray[src_row..src_row + ww]);
+                }
+
+                let darkness = compute_darkness_f32(&tile_gray, ww, wh, params.background_radius);
+                for &sigma in &params.scales {
+                    if sigma <= 0.0 {
+                        continue;
+                    }
+                    let smoothed = gaussian_blur_f32(&darkness, ww, wh, sigma);
+                    let tile_cands = ridge_at_scale(&smoothed, ww, wh, sigma, params.min_strength);
+                    for mut c in tile_cands {
+                        c.x += wx0 as f64;
+                        c.y += wy0 as f64;
+                        // Keep only candidates whose sub-pixel position falls inside
+                        // this tile's non-overlapping interior `[tx0, tx1) × [ty0, ty1)`.
+                        if c.x >= tx0 as f64
+                            && c.x < tx1 as f64
+                            && c.y >= ty0 as f64
+                            && c.y < ty1 as f64
+                        {
+                            all_candidates.push(c);
+                        }
+                    }
+                }
+            }
+
+            tx0 = tx1;
+        }
+        ty0 = ty1;
+    }
+
+    merge_candidates(all_candidates)
 }
 
-/// Background-normalized darkness: `max(0, background − gray)`.
-fn compute_darkness(gray: &[u8], width: usize, height: usize, radius: usize) -> Vec<f64> {
-    let src: Vec<f64> = gray.iter().map(|&v| v as f64).collect();
+/// Snap a raster point `(u, v)` to the nearest sub-pixel ridge within `radius`
+/// pixels (default `≈ 6 px`, `Prompt.txt` §6 & §9). Returns `None` if no ridge
+/// candidate is within `radius`.
+pub fn snap_to_ridge(
+    gray: &[u8],
+    width: usize,
+    height: usize,
+    u: f64,
+    v: f64,
+    radius: f64,
+) -> Option<Point> {
+    if radius <= 0.0 || width < 3 || height < 3 {
+        return None;
+    }
+    let pad = (radius.ceil() as usize) + 2;
+    let cx = (u.floor() as isize).clamp(0, width as isize - 1) as usize;
+    let cy = (v.floor() as isize).clamp(0, height as isize - 1) as usize;
+    let roi = Roi {
+        x0: cx.saturating_sub(pad),
+        y0: cy.saturating_sub(pad),
+        x1: (cx + pad + 1).min(width),
+        y1: (cy + pad + 1).min(height),
+    };
+    let ridges = detect_ridges_roi(gray, width, height, roi, &RidgeParams::default());
+    let mut best: Option<(f64, Point)> = None;
+    for r in ridges {
+        let d = (r.x - u).hypot(r.y - v);
+        if d <= radius {
+            // Prefer closer points, weighted slightly by ridge strength.
+            let score = d - 0.01 * r.strength.min(50.0);
+            if best.is_none() || score < best.unwrap().0 {
+                best = Some((score, Point::new(r.x, r.y)));
+            }
+        }
+    }
+    best.map(|(_, pt)| pt)
+}
+
+/// Background-normalized darkness in `f32`: `max(0, background − gray)`.
+fn compute_darkness_f32(gray: &[u8], width: usize, height: usize, radius: usize) -> Vec<f32> {
     if radius > 0 {
-        let background = box_blur(&src, width, height, radius);
-        src.iter()
+        let background = box_blur_u8_to_f32(gray, width, height, radius);
+        gray.iter()
             .zip(background.iter())
-            .map(|(&g, &b)| (b - g).max(0.0))
+            .map(|(&g, &b)| (b - g as f32).max(0.0))
             .collect()
     } else {
-        // Uniform white background: darkness is simply the inverted gray level.
-        src.iter().map(|&g| (255.0 - g).max(0.0)).collect()
+        gray.iter().map(|&g| (255.0 - g as f32).max(0.0)).collect()
     }
 }
 
@@ -102,16 +276,16 @@ struct Candidate {
     scale: f64,
 }
 
-/// Hessian ridge response at a single scale, with NMS + sub-pixel refinement.
+/// Hessian ridge response at a single scale, with NMS + sub-pixel refinement in `f64`.
 fn ridge_at_scale(
-    l: &[f64],
+    l: &[f32],
     width: usize,
     height: usize,
     sigma: f64,
     min_strength: f64,
 ) -> Vec<Candidate> {
-    let mut responses = vec![f64::NAN; width * height];
-    let mut normals = vec![(0.0_f64, 0.0_f64); width * height];
+    let mut responses = vec![f32::NAN; width * height];
+    let mut normals = vec![(0.0_f32, 0.0_f32); width * height];
 
     for y in 1..height - 1 {
         for x in 1..width - 1 {
@@ -122,8 +296,8 @@ fn ridge_at_scale(
             if lambda1 >= -min_strength {
                 continue;
             }
-            responses[i] = -lambda1;
-            normals[i] = (nx, ny);
+            responses[i] = (-lambda1) as f32;
+            normals[i] = (nx as f32, ny as f32);
         }
     }
 
@@ -136,7 +310,7 @@ fn ridge_at_scale(
             if !r.is_finite() {
                 continue;
             }
-            let (nx, ny) = normals[i];
+            let (nx, ny) = (normals[i].0 as f64, normals[i].1 as f64);
             // Non-maximum suppression along the normal.
             let mut keep = true;
             for sign in [-1.0_f64, 1.0] {
@@ -195,8 +369,7 @@ fn merge_candidates(candidates: Vec<Candidate>) -> Vec<RidgePoint> {
     });
 
     let mut kept: Vec<Candidate> = Vec::new();
-    let mut occupied: std::collections::HashMap<(i64, i64), Vec<usize>> =
-        std::collections::HashMap::new();
+    let mut occupied: HashMap<(i64, i64), Vec<usize>> = HashMap::new();
 
     for c in sorted {
         let kx = (c.x / CELL).floor() as i64;
@@ -231,10 +404,11 @@ fn merge_candidates(candidates: Vec<Candidate>) -> Vec<RidgePoint> {
         .collect()
 }
 
-/// Central finite-difference gradient and Hessian of a smoothed image.
-fn derivatives(l: &[f64], width: usize, x: usize, y: usize) -> (f64, f64, f64, f64, f64) {
-    let idx =
-        |dx: isize, dy: isize| l[(y as isize + dy) as usize * width + (x as isize + dx) as usize];
+/// Central finite-difference gradient and Hessian of a smoothed image (in `f64`).
+fn derivatives(l: &[f32], width: usize, x: usize, y: usize) -> (f64, f64, f64, f64, f64) {
+    let idx = |dx: isize, dy: isize| {
+        l[(y as isize + dy) as usize * width + (x as isize + dx) as usize] as f64
+    };
     let gx = (idx(1, 0) - idx(-1, 0)) / 2.0;
     let gy = (idx(0, 1) - idx(0, -1)) / 2.0;
     let gxx = idx(1, 0) - 2.0 * idx(0, 0) + idx(-1, 0);
@@ -266,32 +440,32 @@ fn symmetric_eigen(a: f64, b: f64, c: f64) -> (f64, f64, (f64, f64), (f64, f64))
     (lambda1, lambda2, (nx, ny), (tx, ty))
 }
 
-/// Separable Gaussian blur with a kernel truncated at `3σ`.
-fn gaussian_blur(src: &[f64], width: usize, height: usize, sigma: f64) -> Vec<f64> {
+/// Separable Gaussian blur with a kernel truncated at `3σ`, using `f32` storage.
+fn gaussian_blur_f32(src: &[f32], width: usize, height: usize, sigma: f64) -> Vec<f32> {
     let kernel = gaussian_kernel(sigma);
     let radius = (kernel.len() / 2) as isize;
 
-    let mut tmp = vec![0.0_f64; width * height];
+    let mut tmp = vec![0.0_f32; width * height];
     for y in 0..height {
         for x in 0..width {
-            let mut acc = 0.0;
+            let mut acc = 0.0_f64;
             for (ki, &kv) in kernel.iter().enumerate() {
                 let xi = (x as isize + ki as isize - radius).clamp(0, width as isize - 1) as usize;
-                acc += src[y * width + xi] * kv;
+                acc += (src[y * width + xi] as f64) * kv;
             }
-            tmp[y * width + x] = acc;
+            tmp[y * width + x] = acc as f32;
         }
     }
 
-    let mut out = vec![0.0_f64; width * height];
+    let mut out = vec![0.0_f32; width * height];
     for y in 0..height {
         for x in 0..width {
-            let mut acc = 0.0;
+            let mut acc = 0.0_f64;
             for (ki, &kv) in kernel.iter().enumerate() {
                 let yi = (y as isize + ki as isize - radius).clamp(0, height as isize - 1) as usize;
-                acc += tmp[yi * width + x] * kv;
+                acc += (tmp[yi * width + x] as f64) * kv;
             }
-            out[y * width + x] = acc;
+            out[y * width + x] = acc as f32;
         }
     }
     out
@@ -312,31 +486,31 @@ fn gaussian_kernel(sigma: f64) -> Vec<f64> {
     kernel
 }
 
-/// O(1)-per-pixel box blur via an integral image.
-fn box_blur(src: &[f64], width: usize, height: usize, radius: usize) -> Vec<f64> {
+/// O(1)-per-pixel box blur via a `u64` integral image (exact, zero overflow on
+/// tiles, half the memory of `f64` integral images).
+fn box_blur_u8_to_f32(src: &[u8], width: usize, height: usize, radius: usize) -> Vec<f32> {
     let stride = width + 1;
-    let mut integral = vec![0.0_f64; (width + 1) * (height + 1)];
+    let mut integral = vec![0u64; (width + 1) * (height + 1)];
     for y in 0..height {
-        let mut row = 0.0;
+        let mut row = 0u64;
         for x in 0..width {
-            row += src[y * width + x];
+            row += src[y * width + x] as u64;
             integral[(y + 1) * stride + (x + 1)] = integral[y * stride + (x + 1)] + row;
         }
     }
 
-    let mut out = vec![0.0_f64; width * height];
+    let mut out = vec![0.0_f32; width * height];
     for y in 0..height {
         let y0 = y.saturating_sub(radius);
         let y1 = (y + radius + 1).min(height);
         for x in 0..width {
             let x0 = x.saturating_sub(radius);
             let x1 = (x + radius + 1).min(width);
-            let sum = integral[y1 * stride + x1]
+            let sum = integral[y1 * stride + x1] + integral[y0 * stride + x0]
                 - integral[y0 * stride + x1]
-                - integral[y1 * stride + x0]
-                + integral[y0 * stride + x0];
+                - integral[y1 * stride + x0];
             let area = (y1 - y0) * (x1 - x0);
-            out[y * width + x] = sum / area as f64;
+            out[y * width + x] = (sum as f64 / area as f64) as f32;
         }
     }
     out
@@ -497,5 +671,28 @@ mod tests {
             "direction {} rad",
             strongest.direction
         );
+    }
+
+    #[test]
+    fn snap_to_ridge_finds_subpixel_line() {
+        let line = (1.0, 0.0, -64.25);
+        let img = line_fixture(128, 128, line, 1.0, 0.0);
+        let snapped = snap_to_ridge(&img, 128, 128, 66.0, 64.0, 6.0).expect("should snap");
+        assert!(
+            (snapped.x - 64.25).abs() < 0.15,
+            "snapped x {} not near 64.25",
+            snapped.x
+        );
+    }
+
+    #[test]
+    fn tiled_multi_tile_matches_line() {
+        // 600×600 image spans multiple 512×512 tiles.
+        let line = (1.0, 0.0, -300.4);
+        let img = line_fixture(600, 600, line, 1.0, 0.0);
+        let points = detect_ridges(&img, 600, 600, &RidgeParams::default());
+        assert!(points.len() > 200);
+        let err = centerline_error(&points, line, 100);
+        assert!(err < 0.15, "multi-tile centerline error {err}");
     }
 }

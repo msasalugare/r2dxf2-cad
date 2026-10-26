@@ -13,12 +13,7 @@ export interface SampleRaster {
   name: string;
 }
 
-export function createSampleRaster(): SampleRaster {
-  const { width, height } = SAMPLE_SIZE;
-  const canvas = new OffscreenCanvas(width, height);
-  const ctx = canvas.getContext('2d');
-  if (!ctx) throw new Error('OffscreenCanvas 2D context unavailable');
-
+function drawSample(ctx: OffscreenCanvasRenderingContext2D, width: number, height: number): void {
   ctx.fillStyle = '#ffffff';
   ctx.fillRect(0, 0, width, height);
 
@@ -50,10 +45,27 @@ export function createSampleRaster(): SampleRaster {
   ctx.moveTo(margin, cy);
   ctx.lineTo(right, cy);
   ctx.stroke();
+}
+
+export function createSampleRaster(): SampleRaster {
+  const { width, height } = SAMPLE_SIZE;
+  const canvas = new OffscreenCanvas(width, height);
+  const ctx = canvas.getContext('2d');
+  if (!ctx) throw new Error('OffscreenCanvas 2D context unavailable');
+  drawSample(ctx, width, height);
 
   return {
     bitmap: canvas.transferToImageBitmap(),
     meta: { pageIndex: 0, width, height, dpi: 0 },
-    name: 'sample',
+    name: 'sample.png',
   };
+}
+
+export async function createSampleBlob(): Promise<Blob> {
+  const { width, height } = SAMPLE_SIZE;
+  const canvas = new OffscreenCanvas(width, height);
+  const ctx = canvas.getContext('2d');
+  if (!ctx) throw new Error('OffscreenCanvas 2D context unavailable');
+  drawSample(ctx, width, height);
+  return canvas.convertToBlob({ type: 'image/png' });
 }

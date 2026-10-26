@@ -1,28 +1,152 @@
-// Minimal sketch tool wired to the WASM core: click to place points, then
-// "Solve" runs the Rust constraint solver and snaps the sketch to its
-// constraints (horizontal + a driving distance on the first segment).
+// FreeCAD Sketcher-style 2D Parametric CAD Editor + RasterFit Free-Parameter Fitter.
+//
+// Supports:
+// - Full FreeCAD Geometry tools: Select/Drag (V), Polyline (P, with M-key mode
+//   cycle: Line / Perpendicular / Tangent / Tangent Arc / Free Arc), Line (L),
+//   Rectangle (R), Centered Rectangle, Slot (S), Circle (C), Arc (A),
+//   Regular Polygon (G), Fillet (F), Trim (T), Point (O), Construction toggle (K).
+// - Full FreeCAD Constraints (selection-first & ID-based): Coincident,
+//   PointOnObject, Horizontal (line or 2 pts), Vertical (line or 2 pts),
+//   Parallel, Perpendicular, Tangent, Equal, Symmetric, Midpoint, Collinear,
+//   Fixed/Block, Distance/LineLength, HorizontalDistance, VerticalDistance,
+//   Radius/ArcRadius, Diameter, Angle/AngleLine, Driving/Reference toggle.
+// - Per-entity SVD DoF coloring (FreeCAD green for locked DoFs, blue dashed for
+//   construction, cyan for selected, red for conflicting), on-canvas constraint
+//   glyphs, and on-canvas dimension leaders with inline value editing.
+// - Native Rust+Python backend (`/api/solve`, `/api/fit`, `/api/export/*`) with
+//   automatic WASM fallback for 60 FPS drag solving and offline operation.
 
+import {
+  checkNativeBackend,
+  exportSketchDxf,
+  exportSketchSvg,
+  getActiveRasterSession,
+  solveSketch,
+  type FitResponse,
+  type SolveResponse,
+} from './backend';
 import { t, tf, type Locale } from './i18n';
-import type { RasterViewer } from './viewer';
+import type {
+  SavedSketchArc,
+  SavedSketchCircle,
+  SavedSketchData,
+  SavedSketchLine,
+  SavedSketchPoint,
+} from './project';
+import type { Affine, RasterViewer } from './viewer';
 import { loadWasm } from './wasm';
 
-interface SketchPoint {
-  id: number;
-  x: number;
-  y: number;
-}
+export type SketchTool =
+  | 'polyline'
+  | 'line'
+  | 'rect'
+  | 'centerRect'
+  | 'slot'
+  | 'circle'
+  | 'arc'
+  | 'arc3pt'
+  | 'polygon'
+  | 'fillet'
+  | 'trim'
+  | 'point'
+  | 'origin'
+  | 'select';
 
-interface SolveResult {
-  converged: boolean;
-  max_residual: number;
-  params: number[];
+export type PolylineSubMode = 'line' | 'perp' | 'tangent' | 'arc' | 'arc-free';
+
+interface SketchSnapshot {
+  points: SavedSketchPoint[];
+  lines: SavedSketchLine[];
+  circles: SavedSketchCircle[];
+  arcs: SavedSketchArc[];
+  constraints: Record<string, unknown>[];
+  reference_constraints: number[];
 }
 
 export class SketchController {
-  private points: SketchPoint[] = [];
-  private pending: { x: number; y: number } | null = null;
+  private points: SavedSketchPoint[] = [];
+  private lines: SavedSketchLine[] = [];
+  private circles: SavedSketchCircle[] = [];
+  private arcs: SavedSketchArc[] = [];
+  private constraints: Record<string, unknown>[] = [];
+  private referenceConstraints: number[] = [];
+
+  private undoStack: SketchSnapshot[] = [];
+  private redoStack: SketchSnapshot[] = [];
+
+  // Selection state for FreeCAD selection-driven constraints
+  private selectedPoints: number[] = [];
+  private selectedLines: number[] = [];
+  private selectedCircles: number[] = [];
+  private selectedArcs: number[] = [];
+
+  private tool: SketchTool = 'polyline';
+  private activeConstraintTool: string | null = null;
+  private editingConstraintIdx: number | null = null;
+  private dimBadgeRects: { cIdx: number; x: number; y: number; w: number; h: number }[] = [];
+  private wasmMod: Awaited<ReturnType<typeof loadWasm>> | null = null;
+  private polyMode: PolylineSubMode = 'line';
+  private polygonSides = 6;
+  private constructionMode = false;
+  private autoConstraints = true;
+  private rasterSnapEnabled = true;
+  private autoPinRaster = false;
+  private loupeEnabled = false;
+  private grayCache: { data: Uint8Array; width: number; height: number } | null = null;
+
+  private pending: {
+    x: number;
+    y: number;
+    pointId?: number;
+    startPointId?: number;
+    lastLineId?: number;
+    lastArcId?: number;
+  } | null = null;
+  private arcStartPending: {
+    centerId: number;
+    startPtId?: number;
+    radius: number;
+    startAngle: number;
+  } | null = null;
+  private arc3PtPending: {
+    p1Id: number;
+    x1: number;
+    y1: number;
+    p2Id?: number;
+    x2?: number;
+    y2?: number;
+  } | null = null;
+  private dragState:
+    | { kind: 'origin' }
+    | { kind: 'point'; id: number; lastX: number; lastY: number }
+    | { kind: 'line'; id: number; lastX: number; lastY: number }
+    | { kind: 'circle'; id: number }
+    | { kind: 'arc-start' | 'arc-end' | 'arc-rim'; id: number }
+    | { kind: 'box'; x0: number; y0: number; x1: number; y1: number }
+    | null = null;
+  private hoverEntity: {
+    kind: 'point' | 'line' | 'circle' | 'arc' | 'origin';
+    id: number;
+  } | null = null;
+  private lastMouse: { x: number; y: number; altKey: boolean } | null = null;
+
+  // RasterFit options (matching raster2sketcher.txt)
+  private fitOpts = {
+    fitGeometry: true,
+    fitRotation: true,
+    fitTranslation: true,
+    fitScale: false,
+    includeConstruction: false,
+    captureRadius: 12.0,
+    robustScale: 1.5,
+  };
+  private preFitSnapshot: { sketch: SketchSnapshot; rasterTransform: Affine } | null = null;
+
   private active = false;
   private resultText = '';
+  private lastSolve: SolveResponse | null = null;
+  private lastFitJson: string | null = null;
+  private lastFit: FitResponse | null = null;
 
   constructor(
     private viewer: RasterViewer,
@@ -30,11 +154,189 @@ export class SketchController {
     private locale: Locale,
     private onStatus: (msg: string, isError?: boolean) => void,
     private getGray: () => Promise<{ data: Uint8Array; width: number; height: number } | null>,
-    private getMaskStrokes: () => { mode: 'include' | 'exclude'; points: { x: number; y: number }[] }[],
-  ) {}
+    private getMaskStrokes: () => {
+      mode: 'include' | 'exclude';
+      kind?: 'brush' | 'polygon' | 'rect';
+      radius?: number;
+      points: { x: number; y: number }[];
+    }[],
+    private onDofChange?: (dof: number, status: 'ok' | 'under' | 'conflict') => void,
+    private onChange?: () => void,
+  ) {
+    void loadWasm()
+      .then((w) => {
+        this.wasmMod = w;
+      })
+      .catch(() => {});
+  }
 
   isActive(): boolean {
     return this.active;
+  }
+
+  getCursor(): string {
+    if (this.dragState) return this.dragState.kind === 'box' ? 'crosshair' : 'grabbing';
+    if (this.activeConstraintTool) return 'pointer';
+    if (this.tool === 'select') {
+      return this.hoverEntity ? 'move' : 'default';
+    }
+    return 'crosshair';
+  }
+
+  /** Provide the current page's gray8 buffer for synchronous sub-pixel raster snapping. */
+  setGrayBuffer(buf: { data: Uint8Array; width: number; height: number } | null): void {
+    this.grayCache = buf;
+  }
+
+  getDof(): number {
+    return this.lastSolve
+      ? this.lastSolve.dof
+      : 2 * this.points.length + this.circles.length + 3 * this.arcs.length;
+  }
+
+  private getScaleMm(): number {
+    const ws = this.viewer.getWorldScale();
+    return ws.sx > 0 && ws.sx !== 1 ? ws.sx : 1;
+  }
+
+  /** Update cursor position (canvas-relative CSS px) for live rubber-band preview & hover highlight. */
+  setLastMouse(x: number, y: number, altKey = false): void {
+    this.lastMouse = { x, y, altKey };
+    if (this.active) {
+      if (this.tool === 'select' && !this.dragState) {
+        const r = this.viewer.screenToRaster(x, y);
+        const orig = this.viewer.getOrigin();
+        const origScreen = this.viewer.rasterToScreen(orig.x, orig.y);
+        if (Math.hypot(x - origScreen.x, y - origScreen.y) <= 12) {
+          this.hoverEntity = { kind: 'origin', id: 0 };
+        } else if (r) {
+          const hitPt = this.findNearPoint(r.x, r.y, 14);
+          if (hitPt) {
+            this.hoverEntity = { kind: 'point', id: hitPt.id };
+          } else {
+            const hitArc = this.findNearArc(r.x, r.y, 10);
+            if (hitArc) {
+              this.hoverEntity = { kind: 'arc', id: hitArc.id };
+            } else {
+              const hitCircle = this.findNearCircle(r.x, r.y, 10);
+              if (hitCircle) {
+                this.hoverEntity = { kind: 'circle', id: hitCircle.id };
+              } else {
+                const hitLine = this.findNearLine(r.x, r.y, 10);
+                this.hoverEntity = hitLine ? { kind: 'line', id: hitLine.id } : null;
+              }
+            }
+          }
+        }
+      } else {
+        this.hoverEntity = null;
+      }
+      this.viewer.requestRender();
+    }
+  }
+
+  /**
+   * FreeCAD Sketcher Esc / Right-click / Double-click state machine:
+   * 1. Close dimension editor if open.
+   * 2. Finish active chain / pending geometry if in progress.
+   * 3. Exit active continuous constraint tool if active.
+   * 4. Switch from any geometry creation tool to Select / Move ('select') mode!
+   * 5. Clear active selection if already in Select mode.
+   */
+  finishChain(): boolean {
+    if (this.editingConstraintIdx !== null) {
+      this.editingConstraintIdx = null;
+      this.render();
+      this.viewer.requestRender();
+      return true;
+    }
+    if (this.pending || this.arcStartPending || this.arc3PtPending) {
+      this.pending = null;
+      this.arcStartPending = null;
+      this.arc3PtPending = null;
+      this.render();
+      this.viewer.requestRender();
+      this.onStatus(t(this.locale, 'status.ready'));
+      return true;
+    }
+    if (this.activeConstraintTool !== null) {
+      this.activeConstraintTool = null;
+      this.tool = 'select';
+      this.render();
+      this.viewer.requestRender();
+      this.onStatus(t(this.locale, 'status.ready'));
+      return true;
+    }
+    if (this.tool !== 'select') {
+      this.setTool('select');
+      this.onStatus('Select / Move mode (Click entities to select, drag to move, or drag box)');
+      return true;
+    }
+    if (
+      this.selectedPoints.length > 0 ||
+      this.selectedLines.length > 0 ||
+      this.selectedCircles.length > 0 ||
+      this.selectedArcs.length > 0
+    ) {
+      this.clearSelection();
+      this.render();
+      this.viewer.requestRender();
+      return true;
+    }
+    return false;
+  }
+
+  clearSelection(): void {
+    this.selectedPoints = [];
+    this.selectedLines = [];
+    this.selectedCircles = [];
+    this.selectedArcs = [];
+  }
+
+  /** Line segments in raster coordinates (used by "Mask from sketch"). */
+  getLineSegments(): { ax: number; ay: number; bx: number; by: number }[] {
+    const out: { ax: number; ay: number; bx: number; by: number }[] = [];
+    for (const l of this.lines) {
+      const a = this.points.find((p) => p.id === l.a);
+      const b = this.points.find((p) => p.id === l.b);
+      if (a && b) out.push({ ax: a.x, ay: a.y, bx: b.x, by: b.y });
+    }
+    return out;
+  }
+
+  exportState(): { sketch: SavedSketchData; lastFitReportJson?: string } {
+    return {
+      sketch: {
+        points: this.points.map((p) => ({ ...p })),
+        lines: this.lines.map((l) => ({ ...l })),
+        circles: this.circles.map((c) => ({ ...c })),
+        arcs: this.arcs.map((a) => ({ ...a })),
+        constraints: this.constraints.map((c) => ({ ...c })),
+        reference_constraints: [...this.referenceConstraints],
+      },
+      lastFitReportJson: this.lastFitJson ?? undefined,
+    };
+  }
+
+  importState(state: SavedSketchData, lastFitReportJson?: string): void {
+    this.points = (state.points ?? []).map((p) => ({ ...p }));
+    this.lines = (state.lines ?? []).map((l) => ({ ...l }));
+    this.circles = (state.circles ?? []).map((c) => ({ ...c }));
+    this.arcs = (state.arcs ?? []).map((a) => ({ ...a }));
+    this.constraints = (state.constraints ?? []).map((c) => ({ ...c }));
+    this.referenceConstraints = [...(state.reference_constraints ?? [])];
+    this.lastFitJson = lastFitReportJson ?? null;
+    this.lastFit = null;
+    this.undoStack = [];
+    this.redoStack = [];
+    this.pending = null;
+    this.arcStartPending = null;
+    this.arc3PtPending = null;
+    this.clearSelection();
+    void this.solveSilent();
+    if (this.active) this.render();
+    this.viewer.requestRender();
+    this.notifyDof();
   }
 
   activate(): void {
@@ -42,96 +344,2514 @@ export class SketchController {
     this.panel.hidden = false;
     this.onStatus(t(this.locale, 'sketch.hint'));
     this.render();
+    this.viewer.requestRender();
+    this.notifyDof();
   }
 
   deactivate(): void {
     this.active = false;
     this.pending = null;
+    this.arcStartPending = null;
+    this.arc3PtPending = null;
+    this.dragState = null;
+    this.hoverEntity = null;
     this.panel.hidden = true;
+    this.viewer.requestRender();
   }
 
-  /** Handle a viewer click; returns true when consumed. */
-  handleClick(clientX: number, clientY: number): boolean {
-    if (!this.active) return false;
-    const r = this.viewer.clientToRaster(clientX, clientY);
-    if (!r) return true;
+  private captureSnapshot(): SketchSnapshot {
+    return {
+      points: this.points.map((p) => ({ ...p })),
+      lines: this.lines.map((l) => ({ ...l })),
+      circles: this.circles.map((c) => ({ ...c })),
+      arcs: this.arcs.map((a) => ({ ...a })),
+      constraints: this.constraints.map((c) => ({ ...c })),
+      reference_constraints: [...this.referenceConstraints],
+    };
+  }
 
-    if (!this.pending) {
-      this.pending = r;
-      this.onStatus(t(this.locale, 'sketch.hint'));
-    } else {
-      this.points.push({ id: this.points.length + 1, x: this.pending.x, y: this.pending.y });
-      this.points.push({ id: this.points.length + 1, x: r.x, y: r.y });
-      this.pending = null;
-      this.resultText = '';
-      this.render();
-      this.onStatus(t(this.locale, 'status.ready'));
+  private pushUndo(): void {
+    this.undoStack.push(this.captureSnapshot());
+    if (this.undoStack.length > 50) this.undoStack.shift();
+    this.redoStack = [];
+  }
+
+  undo(): void {
+    const snap = this.undoStack.pop();
+    if (!snap) return;
+    this.redoStack.push(this.captureSnapshot());
+    this.restoreSnapshot(snap);
+  }
+
+  redo(): void {
+    const snap = this.redoStack.pop();
+    if (!snap) return;
+    this.undoStack.push(this.captureSnapshot());
+    this.restoreSnapshot(snap);
+  }
+
+  private restoreSnapshot(snap: SketchSnapshot): void {
+    this.points = snap.points;
+    this.lines = snap.lines;
+    this.circles = snap.circles;
+    this.arcs = snap.arcs;
+    this.constraints = snap.constraints;
+    this.referenceConstraints = snap.reference_constraints;
+    this.pending = null;
+    this.arcStartPending = null;
+    this.arc3PtPending = null;
+    void this.solveSilent();
+    this.render();
+    this.viewer.requestRender();
+    this.notifyDof();
+    this.onChange?.();
+  }
+
+  handleKey(e: KeyboardEvent): boolean {
+    if (!this.active) return false;
+    if (e.key === 'Escape' || e.key === 'Enter') {
+      if (this.finishChain()) return true;
     }
+    if (e.key === 'Delete' || e.key === 'Backspace') {
+      if (this.deleteSelectedEntities()) return true;
+    }
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
+      if (e.shiftKey) this.redo();
+      else this.undo();
+      return true;
+    }
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') {
+      this.redo();
+      return true;
+    }
+    // FreeCAD Polyline M-key: cycle Line -> Perpendicular -> Tangent -> Arc -> Free Arc.
+    if ((e.key === 'm' || e.key === 'M') && this.tool === 'polyline' && this.pending) {
+      const order: PolylineSubMode[] = ['line', 'perp', 'tangent', 'arc', 'arc-free'];
+      this.polyMode = order[(order.indexOf(this.polyMode) + 1) % order.length];
+      const label =
+        this.polyMode === 'arc'
+          ? 'sketch.polyArc'
+          : this.polyMode === 'arc-free'
+            ? 'sketch.polyArcFree'
+            : this.polyMode === 'perp'
+              ? 'sketch.polyPerp'
+              : this.polyMode === 'tangent'
+                ? 'sketch.polyTangent'
+                : 'sketch.polyLine';
+      this.onStatus(t(this.locale, label));
+      this.render();
+      this.viewer.requestRender();
+      return true;
+    }
+    // M-key toggles between Center-Start-End Arc ('arc') and 3-Point Rim Arc ('arc3pt')
+    if ((e.key === 'm' || e.key === 'M') && (this.tool === 'arc' || this.tool === 'arc3pt')) {
+      this.setTool(this.tool === 'arc' ? 'arc3pt' : 'arc');
+      return true;
+    }
+    // FreeCAD Constraint shortcuts when entities are selected in Select mode:
+    const hasSelection =
+      this.selectedPoints.length +
+        this.selectedLines.length +
+        this.selectedCircles.length +
+        this.selectedArcs.length >
+      0;
+    if (hasSelection && (e.key === 'h' || e.key === 'H')) {
+      this.applyConstraintAction('Horizontal');
+      return true;
+    }
+    if (hasSelection && (e.key === 'n' || e.key === 'N')) {
+      this.applyConstraintAction('Perpendicular');
+      return true;
+    }
+    if (hasSelection && (e.key === 'e' || e.key === 'E')) {
+      this.applyConstraintAction('Equal');
+      return true;
+    }
+    if (hasSelection && (e.key === 'd' || e.key === 'D')) {
+      this.applyConstraintAction('Distance');
+      return true;
+    }
+    if (hasSelection && (e.key === 'b' || e.key === 'B')) {
+      this.applyConstraintAction('Block');
+      return true;
+    }
+    if (e.key === 'k' || e.key === 'K') {
+      this.toggleConstructionMode();
+      return true;
+    }
+    if (e.key === 'p' || e.key === 'P') {
+      this.setTool('polyline');
+      return true;
+    }
+    if (e.key === 'l' || e.key === 'L') {
+      this.setTool('line');
+      return true;
+    }
+    if (e.key === 'r' || e.key === 'R') {
+      this.setTool(e.shiftKey ? 'centerRect' : 'rect');
+      return true;
+    }
+    if (e.key === 's' || e.key === 'S') {
+      this.setTool('slot');
+      return true;
+    }
+    if (e.key === 'c' || e.key === 'C') {
+      this.setTool('circle');
+      return true;
+    }
+    if (e.key === 'a' || e.key === 'A') {
+      this.setTool(e.shiftKey ? 'arc3pt' : 'arc');
+      return true;
+    }
+    if (e.key === 'g' || e.key === 'G') {
+      this.setTool('polygon');
+      return true;
+    }
+    if (e.key === 'f' || e.key === 'F') {
+      this.setTool('fillet');
+      return true;
+    }
+    if (e.key === 't' || e.key === 'T') {
+      this.setTool('trim');
+      return true;
+    }
+    if (e.key === 'o' || e.key === 'O') {
+      this.setTool('point');
+      return true;
+    }
+    if (e.key === 'v' || e.key === 'V') {
+      this.setTool('select');
+      return true;
+    }
+    return false;
+  }
+
+  setTool(tool: SketchTool): void {
+    this.tool = tool;
+    this.activeConstraintTool = null;
+    this.pending = null;
+    this.arcStartPending = null;
+    this.arc3PtPending = null;
+    this.hoverEntity = null;
+    this.render();
+    this.viewer.requestRender();
+  }
+
+  toggleConstructionMode(): void {
+    if (
+      this.selectedLines.length > 0 ||
+      this.selectedCircles.length > 0 ||
+      this.selectedArcs.length > 0
+    ) {
+      this.pushUndo();
+      for (const id of this.selectedLines) {
+        const l = this.lines.find((x) => x.id === id);
+        if (l) l.construction = !l.construction;
+      }
+      for (const id of this.selectedCircles) {
+        const c = this.circles.find((x) => x.id === id);
+        if (c) c.construction = !c.construction;
+      }
+      for (const id of this.selectedArcs) {
+        const a = this.arcs.find((x) => x.id === id);
+        if (a) a.construction = !a.construction;
+      }
+      this.render();
+      this.viewer.requestRender();
+      this.onChange?.();
+    } else {
+      this.constructionMode = !this.constructionMode;
+      this.render();
+    }
+  }
+
+  deleteSelectedEntities(): boolean {
+    if (
+      this.selectedPoints.length === 0 &&
+      this.selectedLines.length === 0 &&
+      this.selectedCircles.length === 0 &&
+      this.selectedArcs.length === 0
+    ) {
+      return false;
+    }
+    this.pushUndo();
+    const delPts = new Set(this.selectedPoints);
+    const delLines = new Set(this.selectedLines);
+    const delCircles = new Set(this.selectedCircles);
+    const delArcs = new Set(this.selectedArcs);
+
+    this.lines = this.lines.filter((l) => !delLines.has(l.id) && !delPts.has(l.a) && !delPts.has(l.b));
+    this.circles = this.circles.filter((c) => !delCircles.has(c.id) && !delPts.has(c.center));
+    this.arcs = this.arcs.filter((a) => !delArcs.has(a.id) && !delPts.has(a.center));
+    this.points = this.points.filter((p) => !delPts.has(p.id));
+    this.pruneOrphanConstraints();
+    this.clearSelection();
+    void this.solveSilent();
+    this.render();
+    this.viewer.requestRender();
+    this.notifyDof();
+    this.onChange?.();
     return true;
   }
 
-  drawOverlay(ctx: CanvasRenderingContext2D): void {
-    if (!this.active || this.points.length === 0) return;
+  /** Delete the current selection (button + Delete/Backspace shortcut). */
+  deleteSelected(): void {
+    if (!this.deleteSelectedEntities()) {
+      this.onStatus(t(this.locale, 'sketch.selectToDelete'), true);
+    }
+  }
+
+  private pruneOrphanConstraints(): void {
+    const ptIds = new Set(this.points.map((p) => p.id));
+    const lnIds = new Set(this.lines.map((l) => l.id));
+    const ciIds = new Set(this.circles.map((c) => c.id));
+    const arIds = new Set(this.arcs.map((a) => a.id));
+
+    this.constraints = this.constraints.filter((c) => {
+      const k = Object.keys(c)[0];
+      const v = (c as Record<string, unknown>)[k];
+      switch (k) {
+        case 'Horizontal':
+        case 'Vertical':
+          return lnIds.has(v as number);
+        case 'LineLength':
+        case 'AngleLine':
+          return Array.isArray(v) && lnIds.has(v[0] as number);
+        case 'Parallel':
+        case 'Perpendicular':
+        case 'EqualLength':
+        case 'Collinear':
+        case 'Angle':
+          return Array.isArray(v) && lnIds.has(v[0] as number) && lnIds.has(v[1] as number);
+        case 'Coincident':
+        case 'HorizontalPoints':
+        case 'VerticalPoints':
+        case 'Distance':
+        case 'HorizontalDistance':
+        case 'VerticalDistance':
+          return Array.isArray(v) && ptIds.has(v[0] as number) && ptIds.has(v[1] as number);
+        case 'FixedPoint':
+          return Array.isArray(v) && ptIds.has(v[0] as number);
+        case 'PointOnLine':
+        case 'Midpoint':
+        case 'DistancePointLine':
+          return Array.isArray(v) && ptIds.has(v[0] as number) && lnIds.has(v[1] as number);
+        case 'PointOnCircle':
+          return Array.isArray(v) && ptIds.has(v[0] as number) && ciIds.has(v[1] as number);
+        case 'PointOnArc':
+          return Array.isArray(v) && ptIds.has(v[0] as number) && arIds.has(v[1] as number);
+        case 'Symmetric':
+          return (
+            Array.isArray(v) &&
+            ptIds.has(v[0] as number) &&
+            ptIds.has(v[1] as number) &&
+            lnIds.has(v[2] as number)
+          );
+        case 'SymmetricPoints':
+          return (
+            Array.isArray(v) &&
+            ptIds.has(v[0] as number) &&
+            ptIds.has(v[1] as number) &&
+            ptIds.has(v[2] as number)
+          );
+        case 'Radius':
+        case 'Diameter':
+          return Array.isArray(v) && ciIds.has(v[0] as number);
+        case 'ArcRadius':
+          return Array.isArray(v) && arIds.has(v[0] as number);
+        case 'EqualRadius':
+        case 'TangentCircleCircle':
+          return Array.isArray(v) && ciIds.has(v[0] as number) && ciIds.has(v[1] as number);
+        case 'EqualRadiusArc':
+        case 'TangentArcArc':
+          return Array.isArray(v) && arIds.has(v[0] as number) && arIds.has(v[1] as number);
+        case 'EqualRadiusCircleArc':
+          return Array.isArray(v) && ciIds.has(v[0] as number) && arIds.has(v[1] as number);
+        case 'TangentLineCircle':
+        case 'PerpendicularLineCircle':
+          return Array.isArray(v) && lnIds.has(v[0] as number) && ciIds.has(v[1] as number);
+        case 'TangentLineArc':
+        case 'PerpendicularLineArc':
+          return Array.isArray(v) && lnIds.has(v[0] as number) && arIds.has(v[1] as number);
+        default:
+          return true;
+      }
+    });
+  }
+
+  /** Find an existing sketch point within `tolScreenPx` CSS pixels on screen. */
+  private findNearPoint(rx: number, ry: number, tolScreenPx = 10): SavedSketchPoint | null {
     const to = this.viewer.rasterToScreen.bind(this.viewer);
+    const targetScreen = to(rx, ry);
+    let best: SavedSketchPoint | null = null;
+    let bestDist = tolScreenPx;
+    for (const p of this.points) {
+      const s = to(p.x, p.y);
+      const d = Math.hypot(s.x - targetScreen.x, s.y - targetScreen.y);
+      if (d <= bestDist) {
+        bestDist = d;
+        best = p;
+      }
+    }
+    return best;
+  }
+
+  /** Find a line segment near `(rx, ry)` within `tolScreenPx` CSS pixels. */
+  private findNearLine(rx: number, ry: number, tolScreenPx = 8): SavedSketchLine | null {
+    const to = this.viewer.rasterToScreen.bind(this.viewer);
+    const pScreen = to(rx, ry);
+    let best: SavedSketchLine | null = null;
+    let bestDist = tolScreenPx;
+    for (const l of this.lines) {
+      const pa = this.points.find((p) => p.id === l.a);
+      const pb = this.points.find((p) => p.id === l.b);
+      if (!pa || !pb) continue;
+      const a = to(pa.x, pa.y);
+      const b = to(pb.x, pb.y);
+      const d = distToSegment(pScreen.x, pScreen.y, a.x, a.y, b.x, b.y);
+      if (d <= bestDist) {
+        bestDist = d;
+        best = l;
+      }
+    }
+    return best;
+  }
+
+  /** Find a circle rim near `(rx, ry)` within `tolScreenPx` CSS pixels. */
+  private findNearCircle(rx: number, ry: number, tolScreenPx = 8): SavedSketchCircle | null {
+    const to = this.viewer.rasterToScreen.bind(this.viewer);
+    const pScreen = to(rx, ry);
+    const zoom = this.viewer.getEffectiveZoom();
+    let best: SavedSketchCircle | null = null;
+    let bestDist = tolScreenPx;
+    for (const c of this.circles) {
+      const center = this.points.find((p) => p.id === c.center);
+      if (!center) continue;
+      const sc = to(center.x, center.y);
+      const d = Math.abs(Math.hypot(pScreen.x - sc.x, pScreen.y - sc.y) - c.radius * zoom);
+      if (d <= bestDist) {
+        bestDist = d;
+        best = c;
+      }
+    }
+    return best;
+  }
+
+  /** Find an arc near `(rx, ry)` within `tolScreenPx` CSS pixels. */
+  private findNearArc(rx: number, ry: number, tolScreenPx = 8): SavedSketchArc | null {
+    const to = this.viewer.rasterToScreen.bind(this.viewer);
+    const pScreen = to(rx, ry);
+    const zoom = this.viewer.getEffectiveZoom();
+    let best: SavedSketchArc | null = null;
+    let bestDist = tolScreenPx;
+    for (const a of this.arcs) {
+      const center = this.points.find((p) => p.id === a.center);
+      if (!center) continue;
+      const sc = to(center.x, center.y);
+      const d = Math.abs(Math.hypot(pScreen.x - sc.x, pScreen.y - sc.y) - a.radius * zoom);
+      if (d <= bestDist && isAngleInArc(Math.atan2(ry - center.y, rx - center.x), a.start, a.end)) {
+        bestDist = d;
+        best = a;
+      }
+    }
+    return best;
+  }
+
+  private nextPointId(): number {
+    return this.points.reduce((m, p) => Math.max(m, p.id), 0) + 1;
+  }
+
+  private nextLineId(): number {
+    return this.lines.reduce((m, l) => Math.max(m, l.id), 0) + 1;
+  }
+
+  private nextCircleId(): number {
+    return this.circles.reduce((m, c) => Math.max(m, c.id), 0) + 1;
+  }
+
+  private nextArcId(): number {
+    return this.arcs.reduce((m, a) => Math.max(m, a.id), 0) + 1;
+  }
+
+  /** Sub-pixel snap to a dark raster line/corner within `r = 8 px` on the PDF/image scan. */
+  private snapRasterPoint(
+    pt: { x: number; y: number },
+    altKey = false,
+  ): { x: number; y: number; snapped: boolean } {
+    if (!this.rasterSnapEnabled || altKey || !this.grayCache) {
+      return { x: pt.x, y: pt.y, snapped: false };
+    }
+    const { data, width, height } = this.grayCache;
+    const r = 8;
+    const u0 = Math.max(1, Math.floor(pt.x - r));
+    const u1 = Math.min(width - 2, Math.ceil(pt.x + r));
+    const v0 = Math.max(1, Math.floor(pt.y - r));
+    const v1 = Math.min(height - 2, Math.ceil(pt.y + r));
+
+    let bestScore = 0;
+    let bestU = pt.x;
+    let bestV = pt.y;
+    for (let v = v0; v <= v1; v += 1) {
+      for (let u = u0; u <= u1; u += 1) {
+        const dist = Math.hypot(u + 0.5 - pt.x, v + 0.5 - pt.y);
+        if (dist > r) continue;
+        const darkness = 255 - data[v * width + u];
+        if (darkness < 28) continue;
+        const score = darkness / (1 + 0.25 * dist);
+        if (score > bestScore) {
+          bestScore = score;
+          const dL = 255 - data[v * width + (u - 1)];
+          const dR = 255 - data[v * width + (u + 1)];
+          const dU = 255 - data[(v - 1) * width + u];
+          const dD = 255 - data[(v + 1) * width + u];
+          const denomX = dL - 2 * darkness + dR;
+          const denomY = dU - 2 * darkness + dD;
+          const dx =
+            Math.abs(denomX) > 1e-3 ? Math.max(-0.5, Math.min(0.5, (0.5 * (dL - dR)) / denomX)) : 0;
+          const dy =
+            Math.abs(denomY) > 1e-3 ? Math.max(-0.5, Math.min(0.5, (0.5 * (dU - dD)) / denomY)) : 0;
+          bestU = u + 0.5 + dx;
+          bestV = v + 0.5 + dy;
+        }
+      }
+    }
+    return bestScore > 0
+      ? { x: bestU, y: bestV, snapped: true }
+      : { x: pt.x, y: pt.y, snapped: false };
+  }
+
+  private snapInputCoord(x: number, y: number, altKey = false): { x: number; y: number } {
+    if (altKey) return { x, y };
+    // 1. Always prioritize snapping to an existing sketch vertex within 16 CSS px for 100% line continuity!
+    const existing = this.findNearPoint(x, y, 16);
+    if (existing) return { x: existing.x, y: existing.y };
+
+    if (this.autoConstraints) {
+      if (!this.viewer.getPage()) {
+        const orig = this.viewer.getOrigin();
+        const origScreen = this.viewer.rasterToScreen(orig.x, orig.y);
+        const curScreen = this.viewer.rasterToScreen(x, y);
+        if (Math.hypot(curScreen.x - origScreen.x, curScreen.y - origScreen.y) <= 12) {
+          return { x: orig.x, y: orig.y };
+        }
+      }
+      // Project onto a nearby line, arc, or circle if within 8 CSS px
+      const hitLine = this.findNearLine(x, y, 8);
+      if (hitLine) {
+        const pa = this.points.find((p) => p.id === hitLine.a);
+        const pb = this.points.find((p) => p.id === hitLine.b);
+        if (pa && pb) return projectPointToSegment(x, y, pa.x, pa.y, pb.x, pb.y);
+      }
+      const hitArc = this.findNearArc(x, y, 8);
+      if (hitArc) {
+        const c = this.points.find((p) => p.id === hitArc.center);
+        if (c) {
+          const ang = Math.atan2(y - c.y, x - c.x);
+          return { x: c.x + hitArc.radius * Math.cos(ang), y: c.y + hitArc.radius * Math.sin(ang) };
+        }
+      }
+      const hitCircle = this.findNearCircle(x, y, 8);
+      if (hitCircle) {
+        const c = this.points.find((p) => p.id === hitCircle.center);
+        if (c) {
+          const ang = Math.atan2(y - c.y, x - c.x);
+          return {
+            x: c.x + hitCircle.radius * Math.cos(ang),
+            y: c.y + hitCircle.radius * Math.sin(ang),
+          };
+        }
+      }
+    }
+    if (this.rasterSnapEnabled && this.grayCache) {
+      const rSnap = this.snapRasterPoint({ x, y }, altKey);
+      if (rSnap.snapped) return { x: rSnap.x, y: rSnap.y };
+    }
+    return this.viewer.snapToGrid(x, y);
+  }
+
+  /** Return all point IDs connected to `ptId` via Coincident constraints (including `ptId` itself). */
+  private getCoincidentCluster(ptId: number): number[] {
+    const visited = new Set<number>([ptId]);
+    const queue = [ptId];
+    while (queue.length > 0) {
+      const cur = queue.shift()!;
+      for (const c of this.constraints) {
+        if ('Coincident' in c) {
+          const [a, b] = (c as { Coincident: number[] }).Coincident;
+          if (a === cur && !visited.has(b)) {
+            visited.add(b);
+            queue.push(b);
+          } else if (b === cur && !visited.has(a)) {
+            visited.add(a);
+            queue.push(a);
+          }
+        }
+      }
+    }
+    return [...visited];
+  }
+
+  /** Keep every arc's start/end angles and its endpoint vertices (`startPt`, `endPt`) 100% continuous. */
+  private syncArcsWithEndpoints(): void {
+    const twoPi = Math.PI * 2;
+    for (const a of this.arcs) {
+      const center = this.points.find((p) => p.id === a.center);
+      if (!center) continue;
+      const ps = a.startPt !== undefined ? this.points.find((p) => p.id === a.startPt) : undefined;
+      const pe = a.endPt !== undefined ? this.points.find((p) => p.id === a.endPt) : undefined;
+      if (ps) {
+        a.start = Math.atan2(ps.y - center.y, ps.x - center.x);
+        ps.x = center.x + a.radius * Math.cos(a.start);
+        ps.y = center.y + a.radius * Math.sin(a.start);
+      }
+      if (pe) {
+        const rawEnd = Math.atan2(pe.y - center.y, pe.x - center.x);
+        let sweep = ((rawEnd - a.start) % twoPi + twoPi) % twoPi;
+        if (sweep < 1e-4) sweep = Math.PI;
+        a.end = a.start + sweep;
+        pe.x = center.x + a.radius * Math.cos(rawEnd);
+        pe.y = center.y + a.radius * Math.sin(rawEnd);
+      }
+    }
+  }
+
+  /** Ensure or update a FixedPoint constraint pinning `ptId` to `(x, y)` on the raster. */
+  private setPointFixedToRaster(ptId: number, x: number, y: number): void {
+    for (const c of this.constraints) {
+      if ('FixedPoint' in c) {
+        const arr = (c as { FixedPoint: number[] }).FixedPoint;
+        if (arr[0] === ptId) {
+          arr[1] = x;
+          arr[2] = y;
+          return;
+        }
+      }
+    }
+    this.constraints.push({ FixedPoint: [ptId, x, y] });
+  }
+
+  /** Update an existing FixedPoint constraint when the user drags a pinned point onto a new raster spot. */
+  private updateExistingFixedPoint(ptId: number, x: number, y: number): void {
+    for (const c of this.constraints) {
+      if ('FixedPoint' in c) {
+        const arr = (c as { FixedPoint: number[] }).FixedPoint;
+        if (arr[0] === ptId) {
+          arr[1] = x;
+          arr[2] = y;
+        }
+      }
+    }
+  }
+
+  private getOrCreatePoint(
+    x: number,
+    y: number,
+    altKey = false,
+    forceNew = false,
+  ): SavedSketchPoint {
+    if (!altKey && !forceNew) {
+      const existing = this.findNearPoint(x, y, 16);
+      if (existing) return existing;
+    }
+    const snapped = forceNew ? { x, y } : this.snapInputCoord(x, y, altKey);
+    const pt: SavedSketchPoint = { id: this.nextPointId(), x: snapped.x, y: snapped.y };
+    this.points.push(pt);
+    if (this.autoPinRaster && this.viewer.getPage() && !altKey && !forceNew) {
+      this.setPointFixedToRaster(pt.id, pt.x, pt.y);
+      return pt;
+    }
+    // Auto point-on-line / point-on-arc / point-on-circle when placed directly on an existing entity
+    if (this.autoConstraints && !altKey && !forceNew) {
+      const orig = this.viewer.getOrigin();
+      if (!this.viewer.getPage() && Math.hypot(pt.x - orig.x, pt.y - orig.y) < 1e-3) {
+        this.constraints.push({ FixedPoint: [pt.id, orig.x, orig.y] });
+      } else {
+        const hitLine = this.findNearLine(pt.x, pt.y, 8);
+        if (hitLine && hitLine.a !== pt.id && hitLine.b !== pt.id) {
+          const pa = this.points.find((p) => p.id === hitLine.a);
+          const pb = this.points.find((p) => p.id === hitLine.b);
+          if (pa && pb) {
+            const proj = projectPointToSegment(pt.x, pt.y, pa.x, pa.y, pb.x, pb.y);
+            pt.x = proj.x;
+            pt.y = proj.y;
+          }
+          this.constraints.push({ PointOnLine: [pt.id, hitLine.id] });
+        } else {
+          const hitArc = this.findNearArc(pt.x, pt.y, 8);
+          if (hitArc && hitArc.center !== pt.id) {
+            const c = this.points.find((p) => p.id === hitArc.center);
+            if (c) {
+              const ang = Math.atan2(pt.y - c.y, pt.x - c.x);
+              pt.x = c.x + hitArc.radius * Math.cos(ang);
+              pt.y = c.y + hitArc.radius * Math.sin(ang);
+            }
+            this.constraints.push({ PointOnArc: [pt.id, hitArc.id] });
+          } else {
+            const hitCircle = this.findNearCircle(pt.x, pt.y, 8);
+            if (hitCircle && hitCircle.center !== pt.id) {
+              const c = this.points.find((p) => p.id === hitCircle.center);
+              if (c) {
+                const ang = Math.atan2(pt.y - c.y, pt.x - c.x);
+                pt.x = c.x + hitCircle.radius * Math.cos(ang);
+                pt.y = c.y + hitCircle.radius * Math.sin(ang);
+              }
+              this.constraints.push({ PointOnCircle: [pt.id, hitCircle.id] });
+            }
+          }
+        }
+      }
+    }
+    return pt;
+  }
+
+  /** Handle pointer drag when in `select` or `origin` mode (live constraint solving + box selection). */
+  handleDrag(clientX: number, clientY: number, phase: 'start' | 'move' | 'end'): boolean {
+    if (!this.active || (this.tool !== 'select' && this.tool !== 'origin')) return false;
+    const r = this.viewer.clientToRaster(clientX, clientY);
+    if (!r) return false;
+    const to = this.viewer.rasterToScreen.bind(this.viewer);
+    const pScreen = to(r.x, r.y);
+
+    if (phase === 'start') {
+      if (this.tool === 'origin') {
+        this.dragState = { kind: 'origin' };
+        this.viewer.setOrigin(r.x, r.y);
+        return true;
+      }
+
+      const hitPt = this.findNearPoint(r.x, r.y, 13);
+      if (hitPt) {
+        this.pushUndo();
+        this.dragState = { kind: 'point', id: hitPt.id, lastX: r.x, lastY: r.y };
+        return true;
+      }
+
+      // Check if user grabbed an arc endpoint handle (Start / End)
+      for (const a of this.arcs) {
+        const center = this.points.find((p) => p.id === a.center);
+        if (!center) continue;
+        const sx = center.x + a.radius * Math.cos(a.start);
+        const sy = center.y + a.radius * Math.sin(a.start);
+        const ex = center.x + a.radius * Math.cos(a.end);
+        const ey = center.y + a.radius * Math.sin(a.end);
+        const sScr = to(sx, sy);
+        const eScr = to(ex, ey);
+        if (Math.hypot(pScreen.x - sScr.x, pScreen.y - sScr.y) <= 10) {
+          this.pushUndo();
+          this.dragState = { kind: 'arc-start', id: a.id };
+          return true;
+        }
+        if (Math.hypot(pScreen.x - eScr.x, pScreen.y - eScr.y) <= 10) {
+          this.pushUndo();
+          this.dragState = { kind: 'arc-end', id: a.id };
+          return true;
+        }
+      }
+
+      // Check if user grabbed the (0,0) Coordinate System Origin bullseye
+      const orig = this.viewer.getOrigin();
+      const origScreen = to(orig.x, orig.y);
+      if (Math.hypot(pScreen.x - origScreen.x, pScreen.y - origScreen.y) <= 12) {
+        this.dragState = { kind: 'origin' };
+        return true;
+      }
+
+      const hitArc = this.findNearArc(r.x, r.y, 10);
+      if (hitArc) {
+        this.pushUndo();
+        this.dragState = { kind: 'arc-rim', id: hitArc.id };
+        return true;
+      }
+      const hitCircle = this.findNearCircle(r.x, r.y, 10);
+      if (hitCircle) {
+        this.pushUndo();
+        this.dragState = { kind: 'circle', id: hitCircle.id };
+        return true;
+      }
+      const hitLine = this.findNearLine(r.x, r.y, 10);
+      if (hitLine) {
+        this.pushUndo();
+        this.dragState = { kind: 'line', id: hitLine.id, lastX: r.x, lastY: r.y };
+        return true;
+      }
+
+      // FreeCAD Sketcher Marquee Window / Crossing Box Selection on empty space!
+      this.dragState = {
+        kind: 'box',
+        x0: pScreen.x,
+        y0: pScreen.y,
+        x1: pScreen.x,
+        y1: pScreen.y,
+      };
+      return true;
+    }
+
+    if (phase === 'move' && this.dragState) {
+      if (this.dragState.kind === 'box') {
+        this.dragState.x1 = pScreen.x;
+        this.dragState.y1 = pScreen.y;
+        this.viewer.requestRender();
+        return true;
+      }
+      if (this.dragState.kind === 'origin') {
+        const alt = this.lastMouse?.altKey ?? false;
+        const snapped =
+          !alt && this.rasterSnapEnabled && this.grayCache
+            ? this.snapRasterPoint(r, false)
+            : { x: r.x, y: r.y };
+        this.viewer.setOrigin(snapped.x, snapped.y);
+        return true;
+      }
+      if (this.dragState.kind === 'point') {
+        const pt = this.points.find((p) => p.id === (this.dragState as { id: number }).id);
+        if (pt) {
+          if (this.selectedPoints.includes(pt.id) && this.selectedPoints.length > 1) {
+            const dx = r.x - this.dragState.lastX;
+            const dy = r.y - this.dragState.lastY;
+            this.dragState.lastX = r.x;
+            this.dragState.lastY = r.y;
+            const moveIds = new Set<number>();
+            for (const pid of this.selectedPoints) {
+              for (const cid of this.getCoincidentCluster(pid)) moveIds.add(cid);
+            }
+            for (const pid of moveIds) {
+              const sp = this.points.find((p) => p.id === pid);
+              if (sp) {
+                sp.x += dx;
+                sp.y += dy;
+                this.updateExistingFixedPoint(sp.id, sp.x, sp.y);
+              }
+            }
+          } else {
+            const alt = this.lastMouse?.altKey ?? false;
+            const rSnap =
+              !alt && this.rasterSnapEnabled && this.grayCache
+                ? this.snapRasterPoint(r, false)
+                : { x: r.x, y: r.y, snapped: false };
+            for (const cid of this.getCoincidentCluster(pt.id)) {
+              const cp = this.points.find((p) => p.id === cid);
+              if (cp) {
+                cp.x = rSnap.x;
+                cp.y = rSnap.y;
+                this.updateExistingFixedPoint(cp.id, cp.x, cp.y);
+              }
+            }
+          }
+          this.syncArcsWithEndpoints();
+          void this.solveSilent();
+          this.viewer.requestRender();
+        }
+      } else if (this.dragState.kind === 'circle') {
+        const c = this.circles.find((x) => x.id === (this.dragState as { id: number }).id);
+        const center = c ? this.points.find((p) => p.id === c.center) : null;
+        if (c && center) {
+          c.radius = Math.max(1, Math.hypot(r.x - center.x, r.y - center.y));
+          void this.solveSilent();
+          this.viewer.requestRender();
+        }
+      } else if (
+        this.dragState.kind === 'arc-start' ||
+        this.dragState.kind === 'arc-end' ||
+        this.dragState.kind === 'arc-rim'
+      ) {
+        const a = this.arcs.find((x) => x.id === (this.dragState as { id: number }).id);
+        const center = a ? this.points.find((p) => p.id === a.center) : null;
+        if (a && center) {
+          if (this.dragState.kind === 'arc-rim') {
+            a.radius = Math.max(1, Math.hypot(r.x - center.x, r.y - center.y));
+          } else if (this.dragState.kind === 'arc-start') {
+            a.start = Math.atan2(r.y - center.y, r.x - center.x);
+          } else {
+            const ang = Math.atan2(r.y - center.y, r.x - center.x);
+            let sweep = ((ang - a.start) % (2 * Math.PI) + 2 * Math.PI) % (2 * Math.PI);
+            if (sweep < 1e-3) sweep = Math.PI * 2;
+            a.end = a.start + sweep;
+          }
+          if (a.startPt !== undefined) {
+            const ps = this.points.find((p) => p.id === a.startPt);
+            if (ps) {
+              ps.x = center.x + a.radius * Math.cos(a.start);
+              ps.y = center.y + a.radius * Math.sin(a.start);
+            }
+          }
+          if (a.endPt !== undefined) {
+            const pe = this.points.find((p) => p.id === a.endPt);
+            if (pe) {
+              pe.x = center.x + a.radius * Math.cos(a.end);
+              pe.y = center.y + a.radius * Math.sin(a.end);
+            }
+          }
+          void this.solveSilent();
+          this.viewer.requestRender();
+        }
+      } else if (this.dragState.kind === 'line') {
+        const l = this.lines.find((x) => x.id === (this.dragState as { id: number }).id);
+        if (l) {
+          const dx = r.x - this.dragState.lastX;
+          const dy = r.y - this.dragState.lastY;
+          this.dragState.lastX = r.x;
+          this.dragState.lastY = r.y;
+          const basePtIds = new Set<number>([l.a, l.b]);
+          if (this.selectedLines.includes(l.id)) {
+            for (const lid of this.selectedLines) {
+              const sl = this.lines.find((x) => x.id === lid);
+              if (sl) {
+                basePtIds.add(sl.a);
+                basePtIds.add(sl.b);
+              }
+            }
+            for (const pid of this.selectedPoints) basePtIds.add(pid);
+          }
+          const movePtIds = new Set<number>();
+          for (const pid of basePtIds) {
+            for (const cid of this.getCoincidentCluster(pid)) movePtIds.add(cid);
+          }
+          for (const pid of movePtIds) {
+            const pt = this.points.find((p) => p.id === pid);
+            if (pt) {
+              pt.x += dx;
+              pt.y += dy;
+              this.updateExistingFixedPoint(pt.id, pt.x, pt.y);
+            }
+          }
+          this.syncArcsWithEndpoints();
+          void this.solveSilent();
+          this.viewer.requestRender();
+        }
+      }
+      return true;
+    }
+
+    if (phase === 'end' && this.dragState) {
+      if (this.dragState.kind === 'box') {
+        const { x0, y0, x1, y1 } = this.dragState;
+        this.dragState = null;
+        if (Math.hypot(x1 - x0, y1 - y0) > 6) {
+          this.applyBoxSelection(x0, y0, x1, y1);
+          this.render();
+          this.viewer.requestRender();
+          return true;
+        }
+        return false;
+      }
+      // Auto-Coincident when dropping a dragged point onto another existing point!
+      if (this.dragState.kind === 'point' && this.autoConstraints && !(this.lastMouse?.altKey)) {
+        const draggedId = this.dragState.id;
+        const draggedPt = this.points.find((p) => p.id === draggedId);
+        if (draggedPt) {
+          const cluster = new Set(this.getCoincidentCluster(draggedId));
+          const ds = to(draggedPt.x, draggedPt.y);
+          for (const other of this.points) {
+            if (cluster.has(other.id)) continue;
+            const os = to(other.x, other.y);
+            if (Math.hypot(ds.x - os.x, ds.y - os.y) <= 12) {
+              draggedPt.x = other.x;
+              draggedPt.y = other.y;
+              this.constraints.push({ Coincident: [draggedId, other.id] });
+              void this.solveSilent();
+              break;
+            }
+          }
+        }
+      }
+      this.dragState = null;
+      this.render();
+      this.viewer.requestRender();
+      this.onChange?.();
+      return true;
+    }
+    return false;
+  }
+
+  /** FreeCAD Window (Left->Right) and Crossing (Right->Left) Box Selection. */
+  private applyBoxSelection(x0: number, y0: number, x1: number, y1: number): void {
+    const to = this.viewer.rasterToScreen.bind(this.viewer);
+    const minX = Math.min(x0, x1);
+    const maxX = Math.max(x0, x1);
+    const minY = Math.min(y0, y1);
+    const maxY = Math.max(y0, y1);
+    const crossing = x1 < x0; // Right-to-left drag = crossing selection
+
+    const inBox = (sx: number, sy: number): boolean =>
+      sx >= minX && sx <= maxX && sy >= minY && sy <= maxY;
+
+    for (const p of this.points) {
+      const s = to(p.x, p.y);
+      if (inBox(s.x, s.y) && !this.selectedPoints.includes(p.id)) {
+        this.selectedPoints.push(p.id);
+      }
+    }
+    for (const l of this.lines) {
+      const pa = this.points.find((p) => p.id === l.a);
+      const pb = this.points.find((p) => p.id === l.b);
+      if (!pa || !pb) continue;
+      const a = to(pa.x, pa.y);
+      const b = to(pb.x, pb.y);
+      const hit = crossing
+        ? inBox(a.x, a.y) ||
+          inBox(b.x, b.y) ||
+          segmentIntersectsRect(a.x, a.y, b.x, b.y, minX, minY, maxX, maxY)
+        : inBox(a.x, a.y) && inBox(b.x, b.y);
+      if (hit && !this.selectedLines.includes(l.id)) {
+        this.selectedLines.push(l.id);
+      }
+    }
+    const zoom = this.viewer.getEffectiveZoom();
+    for (const c of this.circles) {
+      const center = this.points.find((p) => p.id === c.center);
+      if (!center) continue;
+      const sc = to(center.x, center.y);
+      const rScr = c.radius * zoom;
+      const hit = crossing
+        ? sc.x + rScr >= minX && sc.x - rScr <= maxX && sc.y + rScr >= minY && sc.y - rScr <= maxY
+        : sc.x - rScr >= minX && sc.x + rScr <= maxX && sc.y - rScr >= minY && sc.y + rScr <= maxY;
+      if (hit && !this.selectedCircles.includes(c.id)) {
+        this.selectedCircles.push(c.id);
+      }
+    }
+    for (const a of this.arcs) {
+      const center = this.points.find((p) => p.id === a.center);
+      if (!center) continue;
+      const sc = to(center.x, center.y);
+      const rScr = a.radius * zoom;
+      const hit = crossing
+        ? sc.x + rScr >= minX && sc.x - rScr <= maxX && sc.y + rScr >= minY && sc.y - rScr <= maxY
+        : sc.x - rScr >= minX && sc.x + rScr <= maxX && sc.y - rScr >= minY && sc.y + rScr <= maxY;
+      if (hit && !this.selectedArcs.includes(a.id)) {
+        this.selectedArcs.push(a.id);
+      }
+    }
+  }
+
+  private addAutoConstraintForSegment(a: SavedSketchPoint, b: SavedSketchPoint, lineId: number): void {
+    // When reconstructing over a PDF/raster scan, keep clicked endpoints at their exact raster positions
+    // unless the user explicitly applies a Horizontal/Vertical constraint from the toolbar.
+    if (!this.autoConstraints || this.viewer.getPage() !== null) return;
+    const dx = Math.abs(b.x - a.x);
+    const dy = Math.abs(b.y - a.y);
+    const len = Math.hypot(dx, dy);
+    if (len > 2) {
+      if (dy / len < Math.sin((5 * Math.PI) / 180)) {
+        this.constraints.push({ Horizontal: lineId });
+      } else if (dx / len < Math.sin((5 * Math.PI) / 180)) {
+        this.constraints.push({ Vertical: lineId });
+      }
+    }
+  }
+
+  /** Handle entity selection (and FreeCAD Continuous Constraint Mode) in `select` mode. */
+  private handleSelectClick(rx: number, ry: number): boolean {
+    const pScreen = this.viewer.rasterToScreen(rx, ry);
+    // 1. Check if the user clicked an on-canvas Dimension Badge to edit its value!
+    for (const b of this.dimBadgeRects) {
+      if (
+        pScreen.x >= b.x &&
+        pScreen.x <= b.x + b.w &&
+        pScreen.y >= b.y &&
+        pScreen.y <= b.y + b.h
+      ) {
+        this.editingConstraintIdx = b.cIdx;
+        this.render();
+        return true;
+      }
+    }
+
+    const afterSelect = (): boolean => {
+      if (this.activeConstraintTool && this.canApplyConstraintNow(this.activeConstraintTool)) {
+        this.applyConstraintAction(this.activeConstraintTool);
+      } else {
+        this.render();
+        this.viewer.requestRender();
+      }
+      return true;
+    };
+
+    const hitPt = this.findNearPoint(rx, ry, 13);
+    if (hitPt) {
+      toggleInArray(this.selectedPoints, hitPt.id);
+      return afterSelect();
+    }
+    const hitLine = this.findNearLine(rx, ry, 10);
+    if (hitLine) {
+      toggleInArray(this.selectedLines, hitLine.id);
+      return afterSelect();
+    }
+    const hitCircle = this.findNearCircle(rx, ry, 10);
+    if (hitCircle) {
+      toggleInArray(this.selectedCircles, hitCircle.id);
+      return afterSelect();
+    }
+    const hitArc = this.findNearArc(rx, ry, 10);
+    if (hitArc) {
+      toggleInArray(this.selectedArcs, hitArc.id);
+      return afterSelect();
+    }
+    if (
+      this.selectedPoints.length > 0 ||
+      this.selectedLines.length > 0 ||
+      this.selectedCircles.length > 0 ||
+      this.selectedArcs.length > 0
+    ) {
+      this.clearSelection();
+      this.render();
+      this.viewer.requestRender();
+      return true;
+    }
+    return false;
+  }
+
+  /** Handle a viewer click; returns true when consumed. */
+  handleClick(clientX: number, clientY: number, altKey = false): boolean {
+    if (!this.active) return false;
+    const rawR = this.viewer.clientToRaster(clientX, clientY);
+    if (!rawR) return true;
+
+    if (this.tool === 'select') {
+      return this.handleSelectClick(rawR.x, rawR.y);
+    }
+
+    const r = this.snapInputCoord(rawR.x, rawR.y, altKey);
+
+    if (this.tool === 'origin') {
+      this.viewer.setOrigin(r.x, r.y);
+      this.onStatus(`(0,0) → (${r.x.toFixed(1)}, ${r.y.toFixed(1)}) px`);
+      this.render();
+      this.viewer.requestRender();
+      return true;
+    }
+
+    if (this.tool === 'point') {
+      this.pushUndo();
+      this.getOrCreatePoint(rawR.x, rawR.y, altKey);
+      void this.solveSilent();
+      this.render();
+      this.viewer.requestRender();
+      this.notifyDof();
+      this.onChange?.();
+      return true;
+    }
+
+    if (this.tool === 'trim') {
+      const hitLine = this.findNearLine(rawR.x, rawR.y, 10);
+      if (hitLine) {
+        this.pushUndo();
+        this.trimLineAtClick(hitLine, rawR.x, rawR.y);
+        void this.solveSilent();
+        this.render();
+        this.viewer.requestRender();
+        this.notifyDof();
+        this.onChange?.();
+      }
+      return true;
+    }
+
+    if (this.tool === 'fillet') {
+      const cornerPt = this.findNearPoint(rawR.x, rawR.y, 16);
+      if (cornerPt) {
+        const connected = this.lines.filter((l) => l.a === cornerPt.id || l.b === cornerPt.id);
+        if (connected.length >= 2) {
+          this.pushUndo();
+          this.createCornerFillet(cornerPt, connected[0], connected[1]);
+          void this.solveSilent();
+          this.render();
+          this.viewer.requestRender();
+          this.notifyDof();
+          this.onChange?.();
+        }
+      }
+      return true;
+    }
+
+    if (this.tool === 'circle') {
+      if (!this.pending) {
+        this.pending = { x: r.x, y: r.y };
+        this.onStatus(t(this.locale, 'sketch.hint'));
+      } else {
+        this.pushUndo();
+        const center = this.getOrCreatePoint(this.pending.x, this.pending.y, altKey);
+        const radius = Math.max(1, Math.hypot(r.x - center.x, r.y - center.y));
+        this.circles.push({
+          id: this.nextCircleId(),
+          center: center.id,
+          radius,
+          construction: this.constructionMode,
+        });
+        this.pending = null;
+        void this.solveSilent();
+        this.render();
+        this.onStatus(t(this.locale, 'status.ready'));
+        this.notifyDof();
+        this.onChange?.();
+      }
+      this.viewer.requestRender();
+      return true;
+    }
+
+    if (this.tool === 'arc3pt') {
+      if (!this.arc3PtPending) {
+        this.pushUndo();
+        const p1 = this.getOrCreatePoint(rawR.x, rawR.y, altKey);
+        this.arc3PtPending = { p1Id: p1.id, x1: p1.x, y1: p1.y };
+        this.onStatus('3-Pt Arc: Click 2nd endpoint (or M for Center-Start-End)');
+      } else if (this.arc3PtPending.p2Id === undefined) {
+        if (Math.hypot(r.x - this.arc3PtPending.x1, r.y - this.arc3PtPending.y1) < 1.5) {
+          return true;
+        }
+        const p2 = this.getOrCreatePoint(rawR.x, rawR.y, altKey);
+        this.arc3PtPending = {
+          ...this.arc3PtPending,
+          p2Id: p2.id,
+          x2: p2.x,
+          y2: p2.y,
+        };
+        this.onStatus('3-Pt Arc: Click 3rd point on rim');
+      } else {
+        const { p1Id, x1, y1, p2Id, x2, y2 } = this.arc3PtPending;
+        const circ = circumcircleArc(x1, y1, x2!, y2!, r.x, r.y);
+        if (circ) {
+          const cPt = this.getOrCreatePoint(circ.cx, circ.cy, true, true);
+          const arcId = this.nextArcId();
+          const a1 = Math.atan2(y1 - circ.cy, x1 - circ.cx);
+          const startMatchesP1 = Math.abs( Math.atan2(Math.sin(circ.startAngle - a1), Math.cos(circ.startAngle - a1)) ) < 1e-2;
+          this.arcs.push({
+            id: arcId,
+            center: cPt.id,
+            radius: circ.radius,
+            start: circ.startAngle,
+            end: circ.endAngle,
+            startPt: startMatchesP1 ? p1Id : p2Id,
+            endPt: startMatchesP1 ? p2Id : p1Id,
+            construction: this.constructionMode,
+          });
+          this.constraints.push({ PointOnArc: [p1Id, arcId] });
+          this.constraints.push({ PointOnArc: [p2Id!, arcId] });
+        }
+        this.arc3PtPending = null;
+        void this.solveSilent();
+        this.render();
+        this.onStatus(t(this.locale, 'status.ready'));
+        this.notifyDof();
+        this.onChange?.();
+      }
+      this.viewer.requestRender();
+      return true;
+    }
+
+    if (this.tool === 'arc') {
+      if (!this.pending && !this.arcStartPending) {
+        this.pending = { x: r.x, y: r.y };
+        this.onStatus('Arc (Center): Click start point on rim (or M for 3-Pt Arc)');
+      } else if (this.pending && !this.arcStartPending) {
+        this.pushUndo();
+        const center = this.getOrCreatePoint(this.pending.x, this.pending.y, altKey);
+        const startPt = this.getOrCreatePoint(rawR.x, rawR.y, altKey);
+        const radius = Math.max(1, Math.hypot(startPt.x - center.x, startPt.y - center.y));
+        const startAngle = Math.atan2(startPt.y - center.y, startPt.x - center.x);
+        this.arcStartPending = {
+          centerId: center.id,
+          startPtId: startPt.id,
+          radius,
+          startAngle,
+        };
+        this.pending = null;
+        this.onStatus('Arc: Click end angle (hold Alt for reverse sweep)');
+      } else if (this.arcStartPending) {
+        const center = this.points.find((p) => p.id === this.arcStartPending!.centerId)!;
+        const rawEnd = Math.atan2(r.y - center.y, r.x - center.x);
+        let sweep =
+          ((rawEnd - this.arcStartPending.startAngle) % (2 * Math.PI) + 2 * Math.PI) %
+          (2 * Math.PI);
+        if (sweep < 1e-3) sweep = Math.PI;
+        const startAngle = altKey ? rawEnd : this.arcStartPending.startAngle;
+        const endAngle = altKey ? rawEnd + (2 * Math.PI - sweep) : startAngle + sweep;
+        const endPt = this.getOrCreatePoint(
+          center.x + this.arcStartPending.radius * Math.cos(rawEnd),
+          center.y + this.arcStartPending.radius * Math.sin(rawEnd),
+          altKey,
+        );
+        const arcId = this.nextArcId();
+        const sPtId = this.arcStartPending.startPtId;
+        this.arcs.push({
+          id: arcId,
+          center: center.id,
+          radius: this.arcStartPending.radius,
+          start: startAngle,
+          end: endAngle,
+          startPt: altKey ? endPt.id : sPtId,
+          endPt: altKey ? sPtId : endPt.id,
+          construction: this.constructionMode,
+        });
+        if (sPtId !== undefined) {
+          this.constraints.push({ PointOnArc: [sPtId, arcId] });
+        }
+        this.constraints.push({ PointOnArc: [endPt.id, arcId] });
+        this.arcStartPending = null;
+        void this.solveSilent();
+        this.render();
+        this.onStatus(t(this.locale, 'status.ready'));
+        this.notifyDof();
+        this.onChange?.();
+      }
+      this.viewer.requestRender();
+      return true;
+    }
+
+    if (this.tool === 'rect') {
+      if (!this.pending) {
+        const snapPt = !altKey ? this.findNearPoint(rawR.x, rawR.y, 16) : null;
+        this.pending = {
+          x: snapPt ? snapPt.x : r.x,
+          y: snapPt ? snapPt.y : r.y,
+          pointId: snapPt?.id,
+        };
+        this.onStatus(t(this.locale, 'sketch.hint'));
+      } else {
+        const x0 = this.pending.x;
+        const y0 = this.pending.y;
+        const x1 = r.x;
+        const y1 = r.y;
+        if (Math.abs(x1 - x0) > 1 && Math.abs(y1 - y0) > 1) {
+          this.pushUndo();
+          const p1 =
+            (this.pending.pointId !== undefined
+              ? this.points.find((p) => p.id === this.pending!.pointId)
+              : null) ?? this.getOrCreatePoint(x0, y0, altKey);
+          const p2 = this.getOrCreatePoint(x1, y0, true, true);
+          const p3 = this.getOrCreatePoint(x1, y1, altKey);
+          const p4 = this.getOrCreatePoint(x0, y1, true, true);
+          const l1 = this.nextLineId();
+          this.lines.push({ id: l1, a: p1.id, b: p2.id, construction: this.constructionMode });
+          const l2 = this.nextLineId();
+          this.lines.push({ id: l2, a: p2.id, b: p3.id, construction: this.constructionMode });
+          const l3 = this.nextLineId();
+          this.lines.push({ id: l3, a: p3.id, b: p4.id, construction: this.constructionMode });
+          const l4 = this.nextLineId();
+          this.lines.push({ id: l4, a: p4.id, b: p1.id, construction: this.constructionMode });
+          if (this.autoConstraints && !altKey) {
+            this.constraints.push({ Horizontal: l1 });
+            this.constraints.push({ Vertical: l2 });
+            this.constraints.push({ Horizontal: l3 });
+            this.constraints.push({ Vertical: l4 });
+          }
+        }
+        this.pending = null;
+        void this.solveSilent();
+        this.render();
+        this.onStatus(t(this.locale, 'status.ready'));
+        this.notifyDof();
+        this.onChange?.();
+      }
+      this.viewer.requestRender();
+      return true;
+    }
+
+    if (this.tool === 'centerRect') {
+      if (!this.pending) {
+        this.pending = { x: r.x, y: r.y };
+        this.onStatus(t(this.locale, 'sketch.hint'));
+      } else {
+        const cx = this.pending.x;
+        const cy = this.pending.y;
+        const dx = Math.abs(r.x - cx);
+        const dy = Math.abs(r.y - cy);
+        if (dx > 1 && dy > 1) {
+          this.pushUndo();
+          const cPt = this.getOrCreatePoint(cx, cy, altKey);
+          const p1 = this.getOrCreatePoint(cx - dx, cy - dy, true, true);
+          const p2 = this.getOrCreatePoint(cx + dx, cy - dy, true, true);
+          const p3 = this.getOrCreatePoint(cx + dx, cy + dy, true, true);
+          const p4 = this.getOrCreatePoint(cx - dx, cy + dy, true, true);
+          const l1 = this.nextLineId();
+          this.lines.push({ id: l1, a: p1.id, b: p2.id, construction: this.constructionMode });
+          const l2 = this.nextLineId();
+          this.lines.push({ id: l2, a: p2.id, b: p3.id, construction: this.constructionMode });
+          const l3 = this.nextLineId();
+          this.lines.push({ id: l3, a: p3.id, b: p4.id, construction: this.constructionMode });
+          const l4 = this.nextLineId();
+          this.lines.push({ id: l4, a: p4.id, b: p1.id, construction: this.constructionMode });
+          if (this.autoConstraints && !altKey) {
+            this.constraints.push({ Horizontal: l1 });
+            this.constraints.push({ Vertical: l2 });
+            this.constraints.push({ Horizontal: l3 });
+            this.constraints.push({ Vertical: l4 });
+            this.constraints.push({ SymmetricPoints: [p1.id, p3.id, cPt.id] });
+          }
+        }
+        this.pending = null;
+        void this.solveSilent();
+        this.render();
+        this.onStatus(t(this.locale, 'status.ready'));
+        this.notifyDof();
+        this.onChange?.();
+      }
+      this.viewer.requestRender();
+      return true;
+    }
+
+    if (this.tool === 'slot') {
+      if (!this.pending) {
+        this.pending = { x: r.x, y: r.y };
+        this.onStatus(t(this.locale, 'sketch.hint'));
+      } else {
+        const ax = this.pending.x;
+        const ay = this.pending.y;
+        const bx = r.x;
+        const by = r.y;
+        const len = Math.hypot(bx - ax, by - ay);
+        if (len > 4) {
+          this.pushUndo();
+          const rad = Math.max(8, len * 0.25);
+          const angle = Math.atan2(by - ay, bx - ax);
+          const nx = -Math.sin(angle) * rad;
+          const ny = Math.cos(angle) * rad;
+          const c1 = this.getOrCreatePoint(ax, ay, altKey);
+          const c2 = this.getOrCreatePoint(bx, by, altKey);
+          const p1 = this.getOrCreatePoint(ax + nx, ay + ny, true, true);
+          const p2 = this.getOrCreatePoint(bx + nx, by + ny, true, true);
+          const p3 = this.getOrCreatePoint(bx - nx, by - ny, true, true);
+          const p4 = this.getOrCreatePoint(ax - nx, ay - ny, true, true);
+          const lTop = this.nextLineId();
+          this.lines.push({ id: lTop, a: p1.id, b: p2.id, construction: this.constructionMode });
+          const lBot = this.nextLineId();
+          this.lines.push({ id: lBot, a: p3.id, b: p4.id, construction: this.constructionMode });
+          const aRight = this.nextArcId();
+          this.arcs.push({
+            id: aRight,
+            center: c2.id,
+            radius: rad,
+            start: angle - Math.PI / 2,
+            end: angle + Math.PI / 2,
+            startPt: p3.id,
+            endPt: p2.id,
+            construction: this.constructionMode,
+          });
+          const aLeft = this.nextArcId();
+          this.arcs.push({
+            id: aLeft,
+            center: c1.id,
+            radius: rad,
+            start: angle + Math.PI / 2,
+            end: angle + (3 * Math.PI) / 2,
+            startPt: p1.id,
+            endPt: p4.id,
+            construction: this.constructionMode,
+          });
+          this.constraints.push({ PointOnArc: [p2.id, aRight] });
+          this.constraints.push({ PointOnArc: [p3.id, aRight] });
+          this.constraints.push({ PointOnArc: [p1.id, aLeft] });
+          this.constraints.push({ PointOnArc: [p4.id, aLeft] });
+          if (this.autoConstraints && !altKey) {
+            this.constraints.push({ Parallel: [lTop, lBot] });
+            this.constraints.push({ EqualRadiusArc: [aRight, aLeft] });
+            this.constraints.push({ TangentLineArc: [lTop, aRight] });
+            this.constraints.push({ TangentLineArc: [lBot, aRight] });
+            this.constraints.push({ TangentLineArc: [lTop, aLeft] });
+            this.constraints.push({ TangentLineArc: [lBot, aLeft] });
+          }
+        }
+        this.pending = null;
+        void this.solveSilent();
+        this.render();
+        this.onStatus(t(this.locale, 'status.ready'));
+        this.notifyDof();
+        this.onChange?.();
+      }
+      this.viewer.requestRender();
+      return true;
+    }
+
+    if (this.tool === 'polygon') {
+      if (!this.pending) {
+        this.pending = { x: r.x, y: r.y };
+        this.onStatus(t(this.locale, 'sketch.hint'));
+      } else {
+        const cx = this.pending.x;
+        const cy = this.pending.y;
+        const rad = Math.hypot(r.x - cx, r.y - cy);
+        if (rad > 2) {
+          this.pushUndo();
+          const n = Math.max(3, Math.min(12, this.polygonSides));
+          const baseAngle = Math.atan2(r.y - cy, r.x - cx);
+          const centerPt = this.getOrCreatePoint(cx, cy, altKey);
+          const constCircleId = this.nextCircleId();
+          this.circles.push({
+            id: constCircleId,
+            center: centerPt.id,
+            radius: rad,
+            construction: true,
+          });
+          const verts: SavedSketchPoint[] = [];
+          for (let i = 0; i < n; i += 1) {
+            const ang = baseAngle + (i * 2 * Math.PI) / n;
+            const vp = this.getOrCreatePoint(
+              cx + rad * Math.cos(ang),
+              cy + rad * Math.sin(ang),
+              true,
+              true,
+            );
+            verts.push(vp);
+            if (this.autoConstraints && !altKey) {
+              this.constraints.push({ PointOnCircle: [vp.id, constCircleId] });
+            }
+          }
+          const sideIds: number[] = [];
+          for (let i = 0; i < n; i += 1) {
+            const lid = this.nextLineId();
+            this.lines.push({
+              id: lid,
+              a: verts[i].id,
+              b: verts[(i + 1) % n].id,
+              construction: this.constructionMode,
+            });
+            sideIds.push(lid);
+          }
+          if (this.autoConstraints && !altKey) {
+            for (let i = 1; i < sideIds.length; i += 1) {
+              this.constraints.push({ EqualLength: [sideIds[0], sideIds[i]] });
+            }
+          }
+        }
+        this.pending = null;
+        void this.solveSilent();
+        this.render();
+        this.onStatus(t(this.locale, 'status.ready'));
+        this.notifyDof();
+        this.onChange?.();
+      }
+      this.viewer.requestRender();
+      return true;
+    }
+
+    if (this.tool === 'polyline') {
+      if (!this.pending) {
+        const snapPt = !altKey ? this.findNearPoint(rawR.x, rawR.y, 16) : null;
+        this.pending = {
+          x: snapPt ? snapPt.x : r.x,
+          y: snapPt ? snapPt.y : r.y,
+          pointId: snapPt?.id,
+          startPointId: snapPt?.id,
+        };
+        this.polyMode = 'line';
+        this.render();
+        this.onStatus(t(this.locale, 'sketch.finishChain'));
+      } else {
+        const prevPt =
+          this.pending.pointId !== undefined
+            ? this.points.find((p) => p.id === this.pending!.pointId)
+            : null;
+        const startX = prevPt ? prevPt.x : this.pending.x;
+        const startY = prevPt ? prevPt.y : this.pending.y;
+        if (Math.hypot(r.x - startX, r.y - startY) < 1.5) {
+          return true;
+        }
+        this.pushUndo();
+        const a = prevPt ?? this.getOrCreatePoint(startX, startY, altKey);
+        const b = this.getOrCreatePoint(rawR.x, rawR.y, altKey);
+        let newLineId: number | undefined;
+        let newArcId: number | undefined;
+        if (a.id !== b.id) {
+          if (this.polyMode === 'arc' || this.polyMode === 'arc-free') {
+            const tangent = this.polyMode === 'arc';
+            // For a tangent arc, place the center opposite the previous arc's
+            // center (external tangency) so the solver starts from a good guess.
+            const lastArcId = tangent ? this.pending.lastArcId : undefined;
+            const prevArc =
+              lastArcId !== undefined
+                ? this.arcs.find((x) => x.id === lastArcId)
+                : undefined;
+            const prevCenter = prevArc
+              ? this.points.find((p) => p.id === prevArc.center)
+              : undefined;
+            let cPt: SavedSketchPoint;
+            if (prevArc && prevCenter) {
+              const vx = a.x - prevCenter.x;
+              const vy = a.y - prevCenter.y;
+              const vl = Math.hypot(vx, vy) || 1;
+              const guessR = Math.max(1, Math.hypot(b.x - a.x, b.y - a.y) / 2);
+              cPt = this.getOrCreatePoint(a.x + (vx / vl) * guessR, a.y + (vy / vl) * guessR, true, true);
+            } else {
+              const mx = (a.x + b.x) / 2;
+              const my = (a.y + b.y) / 2;
+              cPt = this.getOrCreatePoint(
+                mx - (b.y - a.y) * 0.3,
+                my + (b.x - a.x) * 0.3,
+                true,
+                true,
+              );
+            }
+            const rad = Math.hypot(a.x - cPt.x, a.y - cPt.y) || Math.hypot(b.x - a.x, b.y - a.y) / 2;
+            const arcId = this.nextArcId();
+            this.arcs.push({
+              id: arcId,
+              center: cPt.id,
+              radius: rad,
+              start: Math.atan2(a.y - cPt.y, a.x - cPt.x),
+              end: Math.atan2(b.y - cPt.y, b.x - cPt.x),
+              startPt: a.id,
+              endPt: b.id,
+              construction: this.constructionMode,
+            });
+            this.constraints.push({ PointOnArc: [a.id, arcId] });
+            this.constraints.push({ PointOnArc: [b.id, arcId] });
+            newArcId = arcId;
+            if (tangent) {
+              // Tangent continuation to the previous segment (smooth joint).
+              if (this.pending.lastLineId !== undefined) {
+                this.constraints.push({ TangentLineArc: [this.pending.lastLineId, arcId] });
+              } else if (this.pending.lastArcId !== undefined) {
+                this.constraints.push({ TangentArcArc: [this.pending.lastArcId, arcId] });
+              }
+            }
+          } else {
+            const lineId = this.nextLineId();
+            this.lines.push({
+              id: lineId,
+              a: a.id,
+              b: b.id,
+              construction: this.constructionMode,
+            });
+            newLineId = lineId;
+            if (this.polyMode === 'perp') {
+              if (this.pending.lastLineId !== undefined) {
+                this.constraints.push({ Perpendicular: [this.pending.lastLineId, lineId] });
+              } else if (this.pending.lastArcId !== undefined) {
+                this.constraints.push({ PerpendicularLineArc: [lineId, this.pending.lastArcId] });
+              }
+            } else if (this.polyMode === 'tangent') {
+              if (this.pending.lastLineId !== undefined) {
+                // Tangent to a line == collinear (continue straight).
+                this.constraints.push({ Collinear: [this.pending.lastLineId, lineId] });
+              } else if (this.pending.lastArcId !== undefined) {
+                this.constraints.push({ TangentLineArc: [lineId, this.pending.lastArcId] });
+              }
+            } else {
+              this.addAutoConstraintForSegment(a, b, lineId);
+            }
+          }
+        }
+        const startId = this.pending.startPointId ?? a.id;
+        if (b.id === startId && a.id !== startId) {
+          this.pending = null;
+          this.onStatus(t(this.locale, 'status.ready'));
+        } else {
+          this.pending = {
+            x: b.x,
+            y: b.y,
+            pointId: b.id,
+            startPointId: startId,
+            lastLineId: newLineId,
+            lastArcId: newArcId,
+          };
+          this.onStatus(t(this.locale, 'sketch.finishChain'));
+        }
+        this.resultText = '';
+        void this.solveSilent();
+        this.render();
+        this.notifyDof();
+        this.onChange?.();
+      }
+      this.viewer.requestRender();
+      return true;
+    }
+
+    // Single 'line' tool: two clicks per line segment.
+    if (!this.pending) {
+      const snapPt = !altKey ? this.findNearPoint(rawR.x, rawR.y, 16) : null;
+      this.pending = {
+        x: snapPt ? snapPt.x : r.x,
+        y: snapPt ? snapPt.y : r.y,
+        pointId: snapPt?.id,
+      };
+      this.onStatus(t(this.locale, 'sketch.hint'));
+    } else {
+      const prevPt =
+        this.pending.pointId !== undefined
+          ? this.points.find((p) => p.id === this.pending!.pointId)
+          : null;
+      const startX = prevPt ? prevPt.x : this.pending.x;
+      const startY = prevPt ? prevPt.y : this.pending.y;
+      if (Math.hypot(r.x - startX, r.y - startY) < 1.5) {
+        return true;
+      }
+      this.pushUndo();
+      const a = prevPt ?? this.getOrCreatePoint(startX, startY, altKey);
+      const b = this.getOrCreatePoint(rawR.x, rawR.y, altKey);
+      if (a.id !== b.id) {
+        const lineId = this.nextLineId();
+        this.lines.push({
+          id: lineId,
+          a: a.id,
+          b: b.id,
+          construction: this.constructionMode,
+        });
+        this.addAutoConstraintForSegment(a, b, lineId);
+      }
+
+      this.pending = null;
+      this.resultText = '';
+      void this.solveSilent();
+      this.render();
+      this.onStatus(t(this.locale, 'status.ready'));
+      this.notifyDof();
+      this.onChange?.();
+    }
+    this.viewer.requestRender();
+    return true;
+  }
+
+  private createCornerFillet(
+    corner: SavedSketchPoint,
+    l1: SavedSketchLine,
+    l2: SavedSketchLine,
+  ): void {
+    const p1 = this.points.find((p) => p.id === (l1.a === corner.id ? l1.b : l1.a));
+    const p2 = this.points.find((p) => p.id === (l2.a === corner.id ? l2.b : l2.a));
+    if (!p1 || !p2) return;
+    const len1 = Math.hypot(p1.x - corner.x, p1.y - corner.y);
+    const len2 = Math.hypot(p2.x - corner.x, p2.y - corner.y);
+    const setback = Math.min(len1, len2) * 0.25;
+    if (setback < 1) return;
+
+    const u1x = (p1.x - corner.x) / len1;
+    const u1y = (p1.y - corner.y) / len1;
+    const u2x = (p2.x - corner.x) / len2;
+    const u2y = (p2.y - corner.y) / len2;
+
+    const t1 = this.getOrCreatePoint(corner.x + u1x * setback, corner.y + u1y * setback, true, true);
+    const t2 = this.getOrCreatePoint(corner.x + u2x * setback, corner.y + u2y * setback, true, true);
+    if (l1.a === corner.id) l1.a = t1.id;
+    else l1.b = t1.id;
+    if (l2.a === corner.id) l2.a = t2.id;
+    else l2.b = t2.id;
+
+    const bx = u1x + u2x;
+    const by = u1y + u2y;
+    const bLen = Math.hypot(bx, by) || 1;
+    const halfAngle = Math.acos(Math.max(-0.99, Math.min(0.99, u1x * u2x + u1y * u2y))) / 2;
+    const rad = setback * Math.tan(halfAngle);
+    const centerDist = setback / Math.max(0.1, Math.cos(halfAngle));
+    const centerPt = this.getOrCreatePoint(
+      corner.x + (bx / bLen) * centerDist,
+      corner.y + (by / bLen) * centerDist,
+      true,
+      true,
+    );
+    const a1 = Math.atan2(t1.y - centerPt.y, t1.x - centerPt.x);
+    const a2 = Math.atan2(t2.y - centerPt.y, t2.x - centerPt.x);
+    const twoPi = Math.PI * 2;
+    const sweep12 = ((a2 - a1) % twoPi + twoPi) % twoPi;
+    const useA1Start = sweep12 <= Math.PI;
+    const arcId = this.nextArcId();
+    this.arcs.push({
+      id: arcId,
+      center: centerPt.id,
+      radius: Math.max(1, rad),
+      start: useA1Start ? a1 : a2,
+      end: useA1Start ? a1 + sweep12 : a2 + (twoPi - sweep12),
+      startPt: useA1Start ? t1.id : t2.id,
+      endPt: useA1Start ? t2.id : t1.id,
+      construction: false,
+    });
+    this.constraints.push({ PointOnArc: [t1.id, arcId] });
+    this.constraints.push({ PointOnArc: [t2.id, arcId] });
+    this.constraints.push({ TangentLineArc: [l1.id, arcId] });
+    this.constraints.push({ TangentLineArc: [l2.id, arcId] });
+  }
+
+  private trimLineAtClick(target: SavedSketchLine, clickX: number, clickY: number): void {
+    const pa = this.points.find((p) => p.id === target.a);
+    const pb = this.points.find((p) => p.id === target.b);
+    if (!pa || !pb) return;
+    // Find intersections with all other lines along parameter t in (0.01, 0.99)
+    const ts: number[] = [0, 1];
+    for (const other of this.lines) {
+      if (other.id === target.id) continue;
+      const oa = this.points.find((p) => p.id === other.a);
+      const ob = this.points.find((p) => p.id === other.b);
+      if (!oa || !ob) continue;
+      const tHit = segmentIntersectionT(pa.x, pa.y, pb.x, pb.y, oa.x, oa.y, ob.x, ob.y);
+      if (tHit !== null && tHit > 0.01 && tHit < 0.99) {
+        ts.push(tHit);
+      }
+    }
+    ts.sort((a, b) => a - b);
+    if (ts.length <= 2) {
+      // No interior intersections -> remove the segment
+      this.lines = this.lines.filter((l) => l.id !== target.id);
+      this.pruneOrphanConstraints();
+      return;
+    }
+    const dx = pb.x - pa.x;
+    const dy = pb.y - pa.y;
+    const len2 = dx * dx + dy * dy || 1;
+    const tClick = Math.max(0, Math.min(1, ((clickX - pa.x) * dx + (clickY - pa.y) * dy) / len2));
+    // Find interval [ts[k], ts[k+1]] containing tClick
+    let k = 0;
+    for (let i = 0; i < ts.length - 1; i += 1) {
+      if (tClick >= ts[i] && tClick <= ts[i + 1]) {
+        k = i;
+        break;
+      }
+    }
+    if (k === 0) {
+      const splitPt = this.getOrCreatePoint(pa.x + dx * ts[1], pa.y + dy * ts[1], true);
+      target.a = splitPt.id;
+    } else if (k === ts.length - 2) {
+      const splitPt = this.getOrCreatePoint(pa.x + dx * ts[k], pa.y + dy * ts[k], true);
+      target.b = splitPt.id;
+    } else {
+      const pLeft = this.getOrCreatePoint(pa.x + dx * ts[k], pa.y + dy * ts[k], true);
+      const pRight = this.getOrCreatePoint(pa.x + dx * ts[k + 1], pa.y + dy * ts[k + 1], true);
+      const oldB = target.b;
+      target.b = pLeft.id;
+      this.lines.push({
+        id: this.nextLineId(),
+        a: pRight.id,
+        b: oldB,
+        construction: target.construction,
+      });
+    }
+  }
+
+  private isPointLocked(ptId: number): boolean {
+    const cp = this.lastSolve?.constrained_params;
+    if (!cp) return false;
+    const idx = this.points.findIndex((p) => p.id === ptId);
+    if (idx < 0 || 2 * idx + 1 >= cp.length) return false;
+    return Boolean(cp[2 * idx] && cp[2 * idx + 1]);
+  }
+
+  private isCircleLocked(circleId: number): boolean {
+    const cp = this.lastSolve?.constrained_params;
+    if (!cp) return false;
+    const cIdx = this.circles.findIndex((c) => c.id === circleId);
+    if (cIdx < 0) return false;
+    const c = this.circles[cIdx];
+    const rLocked = Boolean(cp[2 * this.points.length + cIdx]);
+    return this.isPointLocked(c.center) && rLocked;
+  }
+
+  drawOverlay(ctx: CanvasRenderingContext2D): void {
+    if (
+      !this.active &&
+      this.points.length === 0 &&
+      this.lines.length === 0 &&
+      this.circles.length === 0 &&
+      this.arcs.length === 0
+    ) {
+      return;
+    }
+    const to = this.viewer.rasterToScreen.bind(this.viewer);
+    const m = this.viewer.getCombinedTransform();
     const accent = getComputedStyle(this.panel).getPropertyValue('--color-accent').trim() || '#2465c7';
+    const success = '#16a34a'; // FreeCAD Fully Constrained Green
+    const constructionColor = '#3b82f6'; // FreeCAD Construction Blue
+    const selectColor = '#0ea5e9'; // FreeCAD Selection Cyan
+    const hoverColor = '#f59f00'; // Hover highlight Gold
+    const warning = getComputedStyle(this.panel).getPropertyValue('--color-warning').trim() || '#b54708';
+    const danger = getComputedStyle(this.panel).getPropertyValue('--color-danger').trim() || '#dc2626';
+
+    const lineColor = (l: SavedSketchLine): string => {
+      if (this.selectedLines.includes(l.id)) return selectColor;
+      if (this.hoverEntity?.kind === 'line' && this.hoverEntity.id === l.id) return hoverColor;
+      if (this.lastSolve && this.lastSolve.conflicting.length > 0) return danger;
+      if (l.construction) return constructionColor;
+      const stat = this.lastFit?.primitive_stats?.find((s) => s.kind === 'line' && s.id === l.id);
+      if (stat) {
+        if (stat.rms_px < 0.3) return success;
+        if (stat.rms_px < 1.0) return warning;
+        return danger;
+      }
+      if ((this.lastSolve && this.lastSolve.dof === 0) || (this.isPointLocked(l.a) && this.isPointLocked(l.b))) {
+        return success;
+      }
+      return accent;
+    };
 
     ctx.save();
-    ctx.strokeStyle = accent;
-    ctx.fillStyle = accent;
-    ctx.lineWidth = 1.5;
+    ctx.lineWidth = 2.25;
+    ctx.font = '12px Arial, sans-serif';
 
-    // Lines between consecutive points.
-    for (let i = 0; i + 1 < this.points.length; i += 2) {
-      const a = to(this.points[i].x, this.points[i].y);
-      const b = to(this.points[i + 1].x, this.points[i + 1].y);
+    // Lines.
+    for (const l of this.lines) {
+      const pa = this.points.find((p) => p.id === l.a);
+      const pb = this.points.find((p) => p.id === l.b);
+      if (!pa || !pb) continue;
+      const a = to(pa.x, pa.y);
+      const b = to(pb.x, pb.y);
+      const isHi =
+        this.selectedLines.includes(l.id) ||
+        (this.hoverEntity?.kind === 'line' && this.hoverEntity.id === l.id);
+      ctx.strokeStyle = lineColor(l);
+      ctx.lineWidth = isHi ? 3.25 : 2.25;
+      ctx.setLineDash(l.construction ? [6, 4] : []);
       ctx.beginPath();
       ctx.moveTo(a.x, a.y);
       ctx.lineTo(b.x, b.y);
       ctx.stroke();
     }
+
+    // Circles (path built in raster space via combined transform m so zoom/rotation is 100% locked).
+    for (const c of this.circles) {
+      const center = this.points.find((p) => p.id === c.center);
+      if (!center) continue;
+      const isSel = this.selectedCircles.includes(c.id);
+      const isHov = this.hoverEntity?.kind === 'circle' && this.hoverEntity.id === c.id;
+      ctx.strokeStyle = isSel
+        ? selectColor
+        : isHov
+          ? hoverColor
+          : c.construction
+            ? constructionColor
+            : this.isCircleLocked(c.id) || (this.lastSolve && this.lastSolve.dof === 0)
+              ? success
+              : accent;
+      ctx.lineWidth = isSel || isHov ? 3.25 : 2.25;
+      ctx.setLineDash(c.construction ? [6, 4] : []);
+      ctx.save();
+      ctx.transform(m[0], m[1], m[2], m[3], m[4], m[5]);
+      ctx.beginPath();
+      ctx.arc(center.x, center.y, c.radius, 0, Math.PI * 2);
+      ctx.restore();
+      ctx.stroke();
+    }
+
+    // Arcs (path built in raster space via combined transform m so zoom/rotation is 100% locked).
+    for (const a of this.arcs) {
+      const center = this.points.find((p) => p.id === a.center);
+      if (!center) continue;
+      const isSel = this.selectedArcs.includes(a.id);
+      const isHov = this.hoverEntity?.kind === 'arc' && this.hoverEntity.id === a.id;
+      ctx.strokeStyle = isSel
+        ? selectColor
+        : isHov
+          ? hoverColor
+          : a.construction
+            ? constructionColor
+            : this.lastSolve && this.lastSolve.dof === 0
+              ? success
+              : accent;
+      ctx.lineWidth = isSel || isHov ? 3.25 : 2.25;
+      ctx.setLineDash(a.construction ? [6, 4] : []);
+      ctx.save();
+      ctx.transform(m[0], m[1], m[2], m[3], m[4], m[5]);
+      ctx.beginPath();
+      ctx.arc(center.x, center.y, a.radius, a.start, a.end);
+      ctx.restore();
+      ctx.stroke();
+
+      // Draw endpoint & midpoint grab handles when arc is selected or hovered
+      if (isSel || isHov) {
+        ctx.save();
+        ctx.setLineDash([]);
+        const sx = center.x + a.radius * Math.cos(a.start);
+        const sy = center.y + a.radius * Math.sin(a.start);
+        const ex = center.x + a.radius * Math.cos(a.end);
+        const ey = center.y + a.radius * Math.sin(a.end);
+        const midAng = a.start + (((a.end - a.start) % (2 * Math.PI) + 2 * Math.PI) % (2 * Math.PI)) / 2;
+        const mx = center.x + a.radius * Math.cos(midAng);
+        const my = center.y + a.radius * Math.sin(midAng);
+        for (const hp of [to(sx, sy), to(mx, my), to(ex, ey)]) {
+          ctx.fillStyle = '#ffffff';
+          ctx.strokeStyle = isSel ? selectColor : hoverColor;
+          ctx.lineWidth = 2;
+          ctx.fillRect(hp.x - 4, hp.y - 4, 8, 8);
+          ctx.strokeRect(hp.x - 4, hp.y - 4, 8, 8);
+        }
+        ctx.restore();
+      }
+    }
+
+    ctx.setLineDash([]);
+
     // Points.
     for (const p of this.points) {
       const s = to(p.x, p.y);
+      const selected = this.selectedPoints.includes(p.id);
+      const hovered = this.hoverEntity?.kind === 'point' && this.hoverEntity.id === p.id;
+      const locked = this.isPointLocked(p.id) || (this.lastSolve && this.lastSolve.dof === 0);
+      if (selected || hovered) {
+        ctx.save();
+        ctx.strokeStyle = selected ? selectColor : hoverColor;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(s.x, s.y, 9, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.restore();
+      }
+      ctx.fillStyle = selected ? selectColor : hovered ? hoverColor : locked ? success : '#e03131';
       ctx.beginPath();
-      ctx.arc(s.x, s.y, 3, 0, Math.PI * 2);
+      ctx.arc(s.x, s.y, selected || hovered ? 5.5 : 4, 0, Math.PI * 2);
       ctx.fill();
     }
-    // Pending point.
-    if (this.pending) {
+
+    // Draw FreeCAD Marquee Box Selection (Left-to-Right = Window Blue, Right-to-Left = Crossing Green)
+    if (this.dragState?.kind === 'box' && this.lastMouse) {
+      const x0 = this.dragState.x0;
+      const y0 = this.dragState.y0;
+      const x1 = this.lastMouse.x;
+      const y1 = this.lastMouse.y;
+      const crossing = x1 < x0;
+      const rx = Math.min(x0, x1);
+      const ry = Math.min(y0, y1);
+      const rw = Math.abs(x1 - x0);
+      const rh = Math.abs(y1 - y0);
+      ctx.save();
+      ctx.fillStyle = crossing ? 'rgba(34, 197, 94, 0.14)' : 'rgba(14, 165, 233, 0.14)';
+      ctx.strokeStyle = crossing ? '#22c55e' : '#0ea5e9';
+      ctx.lineWidth = 1.75;
+      ctx.setLineDash(crossing ? [6, 4] : []);
+      ctx.fillRect(rx, ry, rw, rh);
+      ctx.strokeRect(rx, ry, rw, rh);
+      ctx.setLineDash([]);
+      ctx.fillStyle = crossing ? '#15803d' : '#0369a1';
+      ctx.font = 'bold 11px Arial, sans-serif';
+      ctx.fillText(crossing ? 'Crossing Select' : 'Window Select', rx + 6, Math.max(14, ry - 5));
+      ctx.restore();
+    }
+
+    // Highlight (0,0) Origin bullseye when hovered or in 'origin' tool
+    if (this.tool === 'origin' || this.hoverEntity?.kind === 'origin') {
+      const orig = this.viewer.getOrigin();
+      const os = to(orig.x, orig.y);
+      ctx.save();
+      ctx.strokeStyle = hoverColor;
+      ctx.lineWidth = 2.25;
+      ctx.beginPath();
+      ctx.arc(os.x, os.y, 11, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    // On-Canvas FreeCAD Constraint Glyphs & Dimension Leaders
+    this.drawConstraintsOverlay(ctx, to, danger, constructionColor);
+
+    // Live cursor snap highlight + rubber-band preview when active.
+    if (this.active && this.lastMouse) {
+      if (this.activeConstraintTool) {
+        ctx.save();
+        ctx.fillStyle = 'rgba(15, 23, 42, 0.86)';
+        const badgeText = `Constraint: ${this.activeConstraintTool} (click entities · Esc to exit)`;
+        const bw = ctx.measureText(badgeText).width + 14;
+        ctx.fillRect(this.lastMouse.x + 14, this.lastMouse.y + 14, bw, 22);
+        ctx.fillStyle = '#38bdf8';
+        ctx.font = 'bold 11px Arial, sans-serif';
+        ctx.fillText(badgeText, this.lastMouse.x + 21, this.lastMouse.y + 29);
+        ctx.restore();
+      }
+      const rect = ctx.canvas.getBoundingClientRect();
+      const curRaster = this.viewer.clientToRaster(
+        rect.left + this.lastMouse.x,
+        rect.top + this.lastMouse.y,
+      );
+      if (curRaster) {
+        const snapPt = !this.lastMouse.altKey
+          ? this.findNearPoint(curRaster.x, curRaster.y, 16)
+          : null;
+        if (snapPt) {
+          const sp = to(snapPt.x, snapPt.y);
+          ctx.save();
+          ctx.strokeStyle = success;
+          ctx.lineWidth = 2.25;
+          ctx.beginPath();
+          ctx.arc(sp.x, sp.y, 9, 0, Math.PI * 2);
+          ctx.stroke();
+          ctx.fillStyle = success;
+          ctx.font = 'bold 11px Arial, sans-serif';
+          ctx.fillText('● Coinc', sp.x + 11, sp.y - 8);
+          ctx.restore();
+        }
+
+        const rSnap =
+          !snapPt && this.rasterSnapEnabled && this.grayCache
+            ? this.snapRasterPoint(curRaster, this.lastMouse.altKey)
+            : { x: curRaster.x, y: curRaster.y, snapped: false };
+        if (rSnap.snapped) {
+          const rsp = to(rSnap.x, rSnap.y);
+          ctx.save();
+          ctx.strokeStyle = '#d9480f';
+          ctx.lineWidth = 1.75;
+          ctx.beginPath();
+          ctx.arc(rsp.x, rsp.y, 6, 0, Math.PI * 2);
+          ctx.moveTo(rsp.x - 9, rsp.y);
+          ctx.lineTo(rsp.x + 9, rsp.y);
+          ctx.moveTo(rsp.x, rsp.y - 9);
+          ctx.lineTo(rsp.x, rsp.y + 9);
+          ctx.stroke();
+          ctx.restore();
+        }
+
+        const snappedCoord = snapPt
+          ? { x: snapPt.x, y: snapPt.y }
+          : rSnap.snapped
+            ? { x: rSnap.x, y: rSnap.y }
+            : this.snapInputCoord(curRaster.x, curRaster.y, this.lastMouse.altKey);
+        const targetX = snappedCoord.x;
+        const targetY = snappedCoord.y;
+        const targetScreen = to(targetX, targetY);
+        const scaleMm = this.getScaleMm();
+        const unitLabel = 'mm';
+
+        if (this.pending) {
+          const pendPt =
+            this.pending.pointId !== undefined
+              ? this.points.find((p) => p.id === this.pending!.pointId)
+              : null;
+          const pendX = pendPt ? pendPt.x : this.pending.x;
+          const pendY = pendPt ? pendPt.y : this.pending.y;
+          const startScreen = to(pendX, pendY);
+          ctx.save();
+          ctx.strokeStyle = accent;
+          ctx.fillStyle = accent;
+          ctx.setLineDash([5, 4]);
+          ctx.beginPath();
+          ctx.arc(startScreen.x, startScreen.y, 4.5, 0, Math.PI * 2);
+          ctx.fill();
+
+          if (this.tool === 'line' || this.tool === 'polyline') {
+            const dx = targetX - pendX;
+            const dy = targetY - pendY;
+            const len = Math.hypot(dx, dy);
+            const deg = (Math.atan2(-dy, dx) * 180) / Math.PI;
+            let hvBadge = this.tool === 'polyline' && this.polyMode !== 'line' ? ` [${this.polyMode}]` : '';
+            if (this.autoConstraints && !this.lastMouse.altKey && len > 2 && hvBadge === '') {
+              if (Math.abs(dy) / len < Math.sin((5 * Math.PI) / 180)) hvBadge = ' [H]';
+              else if (Math.abs(dx) / len < Math.sin((5 * Math.PI) / 180)) hvBadge = ' [V]';
+            }
+            ctx.beginPath();
+            ctx.moveTo(startScreen.x, startScreen.y);
+            ctx.lineTo(targetScreen.x, targetScreen.y);
+            ctx.stroke();
+            ctx.fillText(
+              `${(len * scaleMm).toFixed(1)} ${unitLabel} · ${deg.toFixed(1)}°${hvBadge}`,
+              targetScreen.x + 10,
+              targetScreen.y - 10,
+            );
+          } else if (this.tool === 'rect') {
+            const w = targetScreen.x - startScreen.x;
+            const h = targetScreen.y - startScreen.y;
+            ctx.strokeRect(startScreen.x, startScreen.y, w, h);
+            const rw = Math.abs(targetX - pendX) * scaleMm;
+            const rh = Math.abs(targetY - pendY) * scaleMm;
+            ctx.fillText(
+              `${rw.toFixed(1)} × ${rh.toFixed(1)} ${unitLabel}`,
+              targetScreen.x + 10,
+              targetScreen.y - 10,
+            );
+          } else if (this.tool === 'centerRect') {
+            const hw = Math.abs(targetScreen.x - startScreen.x);
+            const hh = Math.abs(targetScreen.y - startScreen.y);
+            ctx.strokeRect(startScreen.x - hw, startScreen.y - hh, hw * 2, hh * 2);
+          } else if (this.tool === 'circle' || this.tool === 'polygon' || this.tool === 'arc') {
+            const rPx = Math.hypot(targetX - pendX, targetY - pendY);
+            ctx.save();
+            ctx.transform(m[0], m[1], m[2], m[3], m[4], m[5]);
+            ctx.beginPath();
+            ctx.arc(pendX, pendY, rPx, 0, Math.PI * 2);
+            ctx.restore();
+            ctx.stroke();
+            ctx.beginPath();
+            ctx.moveTo(startScreen.x, startScreen.y);
+            ctx.lineTo(targetScreen.x, targetScreen.y);
+            ctx.stroke();
+            ctx.fillText(
+              `R ${(rPx * scaleMm).toFixed(1)} ${unitLabel}`,
+              targetScreen.x + 10,
+              targetScreen.y - 10,
+            );
+          } else if (this.tool === 'slot') {
+            ctx.beginPath();
+            ctx.moveTo(startScreen.x, startScreen.y);
+            ctx.lineTo(targetScreen.x, targetScreen.y);
+            ctx.stroke();
+          }
+          ctx.restore();
+        } else if (this.arcStartPending) {
+          const center = this.points.find((p) => p.id === this.arcStartPending!.centerId);
+          if (center) {
+            const sc = to(center.x, center.y);
+            const rawEnd = Math.atan2(targetY - center.y, targetX - center.x);
+            let sweep =
+              ((rawEnd - this.arcStartPending.startAngle) % (2 * Math.PI) + 2 * Math.PI) %
+              (2 * Math.PI);
+            if (sweep < 1e-3) sweep = Math.PI;
+            const startAngle = this.lastMouse.altKey ? rawEnd : this.arcStartPending.startAngle;
+            const endAngle = this.lastMouse.altKey
+              ? rawEnd + (2 * Math.PI - sweep)
+              : startAngle + sweep;
+            const endRimScreen = to(
+              center.x + this.arcStartPending.radius * Math.cos(rawEnd),
+              center.y + this.arcStartPending.radius * Math.sin(rawEnd),
+            );
+            ctx.save();
+            ctx.strokeStyle = accent;
+            ctx.fillStyle = accent;
+            ctx.setLineDash([5, 4]);
+            ctx.save();
+            ctx.transform(m[0], m[1], m[2], m[3], m[4], m[5]);
+            ctx.beginPath();
+            ctx.arc(center.x, center.y, this.arcStartPending.radius, startAngle, endAngle);
+            ctx.restore();
+            ctx.stroke();
+            ctx.beginPath();
+            ctx.moveTo(sc.x, sc.y);
+            ctx.lineTo(endRimScreen.x, endRimScreen.y);
+            ctx.stroke();
+            const degSweep = (((endAngle - startAngle) * 180) / Math.PI).toFixed(1);
+            ctx.fillText(
+              `R ${(this.arcStartPending.radius * scaleMm).toFixed(1)} ${unitLabel} · Δ∠ ${degSweep}°`,
+              endRimScreen.x + 10,
+              endRimScreen.y - 10,
+            );
+            ctx.restore();
+          }
+        } else if (this.arc3PtPending) {
+          const s1 = to(this.arc3PtPending.x1, this.arc3PtPending.y1);
+          ctx.save();
+          ctx.strokeStyle = accent;
+          ctx.fillStyle = accent;
+          ctx.setLineDash([5, 4]);
+          if (this.arc3PtPending.p2Id === undefined) {
+            ctx.beginPath();
+            ctx.moveTo(s1.x, s1.y);
+            ctx.lineTo(targetScreen.x, targetScreen.y);
+            ctx.stroke();
+            const chord = Math.hypot(targetX - this.arc3PtPending.x1, targetY - this.arc3PtPending.y1);
+            ctx.fillText(
+              `Chord ${(chord * scaleMm).toFixed(1)} ${unitLabel}`,
+              targetScreen.x + 10,
+              targetScreen.y - 10,
+            );
+          } else {
+            const circ = circumcircleArc(
+              this.arc3PtPending.x1,
+              this.arc3PtPending.y1,
+              this.arc3PtPending.x2!,
+              this.arc3PtPending.y2!,
+              targetX,
+              targetY,
+            );
+            if (circ) {
+              ctx.save();
+              ctx.transform(m[0], m[1], m[2], m[3], m[4], m[5]);
+              ctx.beginPath();
+              ctx.arc(circ.cx, circ.cy, circ.radius, circ.startAngle, circ.endAngle);
+              ctx.restore();
+              ctx.stroke();
+              ctx.fillText(
+                `R ${(circ.radius * scaleMm).toFixed(1)} ${unitLabel}`,
+                targetScreen.x + 10,
+                targetScreen.y - 10,
+              );
+            }
+          }
+          ctx.restore();
+        }
+        if (this.loupeEnabled) {
+          this.drawSketchLoupe(ctx, this.lastMouse.x, this.lastMouse.y, targetX, targetY, accent);
+        }
+      }
+    } else if (this.pending) {
       const s = to(this.pending.x, this.pending.y);
       ctx.beginPath();
-      ctx.arc(s.x, s.y, 3, 0, Math.PI * 2);
+      ctx.arc(s.x, s.y, 4, 0, Math.PI * 2);
       ctx.fill();
     }
     ctx.restore();
   }
 
+  private drawSketchLoupe(
+    ctx: CanvasRenderingContext2D,
+    mouseX: number,
+    mouseY: number,
+    rasterX: number,
+    rasterY: number,
+    accent: string,
+  ): void {
+    const page = this.viewer.getPage();
+    if (!page || page.levels.length === 0) return;
+    const level0 = page.levels[0];
+    const radius = 56;
+    const mag = 8;
+    const srcSpan = (radius * 2) / mag;
+    const cx = mouseX > radius * 2 + 30 ? mouseX - radius - 22 : mouseX + radius + 22;
+    const cy = mouseY > radius * 2 + 30 ? mouseY - radius - 22 : mouseY + radius + 22;
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+    ctx.clip();
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(cx - radius, cy - radius, radius * 2, radius * 2);
+    ctx.imageSmoothingEnabled = false;
+
+    const tileSize = 256;
+    const u0 = rasterX - srcSpan / 2;
+    const v0 = rasterY - srcSpan / 2;
+    const col0 = Math.max(0, Math.floor(u0 / tileSize));
+    const row0 = Math.max(0, Math.floor(v0 / tileSize));
+    const col1 = Math.min(level0.tileCols - 1, Math.floor((u0 + srcSpan) / tileSize));
+    const row1 = Math.min(level0.tileRows - 1, Math.floor((v0 + srcSpan) / tileSize));
+    for (let r = row0; r <= row1; r += 1) {
+      for (let c = col0; c <= col1; c += 1) {
+        const tile = level0.tiles[r * level0.tileCols + c];
+        if (!tile) continue;
+        const dx = cx - radius + (c * tileSize - u0) * mag;
+        const dy = cy - radius + (r * tileSize - v0) * mag;
+        ctx.drawImage(tile, dx, dy, tile.width * mag, tile.height * mag);
+      }
+    }
+    ctx.restore();
+
+    ctx.save();
+    ctx.strokeStyle = accent;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.strokeStyle = '#d9480f';
+    ctx.lineWidth = 1.25;
+    ctx.beginPath();
+    ctx.moveTo(cx - 10, cy);
+    ctx.lineTo(cx + 10, cy);
+    ctx.moveTo(cx, cy - 10);
+    ctx.lineTo(cx, cy + 10);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  private drawConstraintsOverlay(
+    ctx: CanvasRenderingContext2D,
+    to: (rx: number, ry: number) => { x: number; y: number },
+    drivingColor: string,
+    refColor: string,
+  ): void {
+    const scaleMm = this.getScaleMm();
+    this.dimBadgeRects = [];
+    ctx.save();
+    ctx.font = 'bold 11px Arial, sans-serif';
+
+    this.constraints.forEach((c, idx) => {
+      const key = Object.keys(c)[0];
+      const val = (c as Record<string, unknown>)[key];
+      const isRef = this.referenceConstraints.includes(idx);
+      const dimColor = isRef ? refColor : drivingColor;
+
+      const drawBadge = (
+        sx: number,
+        sy: number,
+        text: string,
+        color = '#d9480f',
+        clickableIdx?: number,
+      ): void => {
+        const w = ctx.measureText(text).width + 8;
+        ctx.fillStyle =
+          clickableIdx !== undefined && this.editingConstraintIdx === clickableIdx
+            ? '#fef08a'
+            : 'rgba(255, 255, 255, 0.92)';
+        ctx.fillRect(sx - w / 2, sy - 9, w, 16);
+        ctx.strokeStyle = color;
+        ctx.lineWidth =
+          clickableIdx !== undefined && this.editingConstraintIdx === clickableIdx ? 2 : 1;
+        ctx.strokeRect(sx - w / 2, sy - 9, w, 16);
+        ctx.fillStyle = color;
+        ctx.fillText(text, sx - w / 2 + 4, sy + 3);
+        if (clickableIdx !== undefined) {
+          this.dimBadgeRects.push({
+            cIdx: clickableIdx,
+            x: sx - w / 2 - 4,
+            y: sy - 11,
+            w: w + 8,
+            h: 20,
+          });
+        }
+      };
+
+      if (key === 'Horizontal' || key === 'Vertical') {
+        const l = this.lines.find((x) => x.id === (val as number));
+        if (!l) return;
+        const pa = this.points.find((p) => p.id === l.a);
+        const pb = this.points.find((p) => p.id === l.b);
+        if (!pa || !pb) return;
+        const a = to(pa.x, pa.y);
+        const b = to(pb.x, pb.y);
+        drawBadge((a.x + b.x) / 2, (a.y + b.y) / 2 - 12, key === 'Horizontal' ? 'H' : 'V');
+      } else if (key === 'Parallel' || key === 'Perpendicular' || key === 'EqualLength') {
+        const arr = val as number[];
+        const l = this.lines.find((x) => x.id === arr[0]);
+        if (!l) return;
+        const pa = this.points.find((p) => p.id === l.a);
+        const pb = this.points.find((p) => p.id === l.b);
+        if (!pa || !pb) return;
+        const a = to(pa.x, pa.y);
+        const b = to(pb.x, pb.y);
+        const sym = key === 'Parallel' ? '∥' : key === 'Perpendicular' ? '⊥' : '=';
+        drawBadge((a.x + b.x) / 2 + 12, (a.y + b.y) / 2 + 12, sym);
+      } else if (key === 'Coincident') {
+        const arr = val as number[];
+        const pt = this.points.find((p) => p.id === arr[0]);
+        if (!pt) return;
+        const s = to(pt.x, pt.y);
+        ctx.save();
+        ctx.strokeStyle = '#d9480f';
+        ctx.lineWidth = 1.75;
+        ctx.beginPath();
+        ctx.arc(s.x, s.y, 7.5, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.restore();
+      } else if (key === 'FixedPoint') {
+        const arr = val as number[];
+        const pt = this.points.find((p) => p.id === arr[0]);
+        if (!pt) return;
+        const s = to(pt.x, pt.y);
+        drawBadge(s.x + 12, s.y - 10, '🔒');
+      } else if (key === 'Distance' || key === 'HorizontalDistance' || key === 'VerticalDistance') {
+        const arr = val as number[];
+        const p1 = this.points.find((p) => p.id === arr[0]);
+        const p2 = this.points.find((p) => p.id === arr[1]);
+        if (!p1 || !p2) return;
+        const a = to(p1.x, p1.y);
+        const b = to(p2.x, p2.y);
+        const mmVal = (arr[2] * scaleMm).toFixed(1);
+        const prefix = key === 'HorizontalDistance' ? 'ΔX ' : key === 'VerticalDistance' ? 'ΔY ' : '';
+        ctx.strokeStyle = dimColor;
+        ctx.lineWidth = 1;
+        ctx.setLineDash([3, 3]);
+        ctx.beginPath();
+        ctx.moveTo(a.x, a.y - 18);
+        ctx.lineTo(b.x, b.y - 18);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        drawBadge((a.x + b.x) / 2, (a.y + b.y) / 2 - 22, `${prefix}${mmVal} mm`, dimColor, idx);
+      } else if (key === 'DistancePointLine') {
+        const arr = val as number[];
+        const pt = this.points.find((p) => p.id === arr[0]);
+        if (!pt) return;
+        const s = to(pt.x, pt.y);
+        const mmVal = (arr[2] * scaleMm).toFixed(1);
+        drawBadge(s.x + 18, s.y - 18, `${mmVal} mm`, dimColor, idx);
+      } else if (key === 'LineLength') {
+        const arr = val as number[];
+        const l = this.lines.find((x) => x.id === arr[0]);
+        if (!l) return;
+        const pa = this.points.find((p) => p.id === l.a);
+        const pb = this.points.find((p) => p.id === l.b);
+        if (!pa || !pb) return;
+        const a = to(pa.x, pa.y);
+        const b = to(pb.x, pb.y);
+        const mmVal = (arr[1] * scaleMm).toFixed(1);
+        drawBadge((a.x + b.x) / 2, (a.y + b.y) / 2 - 22, `${mmVal} mm`, dimColor, idx);
+      } else if (key === 'Radius' || key === 'Diameter' || key === 'ArcRadius') {
+        const arr = val as number[];
+        const c =
+          key === 'ArcRadius'
+            ? this.arcs.find((x) => x.id === arr[0])
+            : this.circles.find((x) => x.id === arr[0]);
+        if (!c) return;
+        const center = this.points.find((p) => p.id === c.center);
+        if (!center) return;
+        const sc = to(center.x, center.y);
+        const mmVal = (arr[1] * scaleMm).toFixed(1);
+        const prefix = key === 'Diameter' ? '⌀ ' : 'R ';
+        drawBadge(sc.x + 24, sc.y - 18, `${prefix}${mmVal} mm`, dimColor, idx);
+      } else if (key === 'Angle' || key === 'AngleLine') {
+        const arr = val as number[];
+        const rad = key === 'Angle' ? arr[2] : arr[1];
+        const l = this.lines.find((x) => x.id === arr[0]);
+        if (!l) return;
+        const pa = this.points.find((p) => p.id === l.a);
+        if (!pa) return;
+        const sa = to(pa.x, pa.y);
+        drawBadge(sa.x + 22, sa.y - 16, `∠ ${((rad * 180) / Math.PI).toFixed(1)}°`, dimColor, idx);
+      }
+    });
+
+    ctx.restore();
+  }
+
+  private applyParams(params: number[]): void {
+    for (let i = 0; i < this.points.length; i += 1) {
+      this.points[i].x = params[2 * i];
+      this.points[i].y = params[2 * i + 1];
+    }
+    const cBase = 2 * this.points.length;
+    for (let j = 0; j < this.circles.length; j += 1) {
+      this.circles[j].radius = Math.abs(params[cBase + j]);
+    }
+    const aBase = cBase + this.circles.length;
+    for (let k = 0; k < this.arcs.length; k += 1) {
+      this.arcs[k].radius = Math.abs(params[aBase + 3 * k]);
+      this.arcs[k].start = params[aBase + 3 * k + 1];
+      this.arcs[k].end = params[aBase + 3 * k + 2];
+    }
+    this.syncArcsWithEndpoints();
+    if (this.pending?.pointId !== undefined) {
+      const pendPt = this.points.find((p) => p.id === this.pending!.pointId);
+      if (pendPt) {
+        this.pending.x = pendPt.x;
+        this.pending.y = pendPt.y;
+      }
+    }
+  }
+
+  private async solveSilent(): Promise<void> {
+    if (this.points.length === 0) return;
+    if (this.constraints.length === 0) {
+      this.syncArcsWithEndpoints();
+      this.lastSolve = null;
+      this.notifyDof();
+      return;
+    }
+    try {
+      const sketch = this.buildSketch();
+      if (this.wasmMod) {
+        const result = JSON.parse(
+          this.wasmMod.solve_constraints(JSON.stringify(sketch)),
+        ) as SolveResponse;
+        this.applyParams(result.params);
+        this.lastSolve = result;
+        this.notifyDof();
+        return;
+      }
+      const result = await solveSketch(sketch, true);
+      this.applyParams(result.params);
+      this.lastSolve = result;
+      this.notifyDof();
+    } catch {
+      // Ignore transient drag solve errors.
+    }
+  }
+
   async solve(): Promise<void> {
-    if (this.points.length < 2) {
+    this.pending = null;
+    this.arcStartPending = null;
+    if (this.points.length < 2 && this.circles.length === 0 && this.arcs.length === 0) {
       this.onStatus(t(this.locale, 'sketch.none'), true);
       return;
     }
     try {
-      const wasm = await loadWasm();
       const sketch = this.buildSketch();
-      const result: SolveResult = JSON.parse(wasm.solve_constraints(JSON.stringify(sketch)));
-      for (let i = 0; i < this.points.length; i += 1) {
-        this.points[i].x = result.params[2 * i];
-        this.points[i].y = result.params[2 * i + 1];
-      }
+      const result = await solveSketch(sketch, false);
+      this.applyParams(result.params);
+      this.lastSolve = result;
       this.resultText = result.converged
         ? tf(this.locale, 'sketch.result', { r: result.max_residual.toExponential(2) })
         : t(this.locale, 'error.failed');
       this.onStatus(this.resultText, !result.converged);
       this.render();
+      this.viewer.requestRender();
+      this.notifyDof();
+      this.onChange?.();
     } catch (err) {
       this.onStatus(t(this.locale, 'error.failed'), true);
       console.error('sketch solve failed', err);
     }
   }
 
-  async fit(): Promise<void> {
-    if (this.points.length < 2) {
+  async fit(previewOnly = false): Promise<void> {
+    this.pending = null;
+    this.arcStartPending = null;
+    if (this.points.length < 2 && this.circles.length === 0 && this.arcs.length === 0) {
       this.onStatus(t(this.locale, 'sketch.none'), true);
       return;
     }
@@ -141,110 +2861,1137 @@ export class SketchController {
         this.onStatus(t(this.locale, 'sketch.none'), true);
         return;
       }
+      if (previewOnly && !this.preFitSnapshot) {
+        this.preFitSnapshot = {
+          sketch: this.captureSnapshot(),
+          rasterTransform: this.viewer.getRasterTransform(),
+        };
+      } else if (!previewOnly) {
+        this.preFitSnapshot = null;
+        this.pushUndo();
+      }
+
       const wasm = await loadWasm();
       const ridgeParams = { scales: [1.0, 1.5, 2.5], background_radius: 24, min_strength: 5.0 };
+
+      // Restrict ridge detection to the sketch bounding box + 200 px margin (Prompt.txt §2).
+      const roi = this.computeSketchRoi(gray.width, gray.height, 200);
       const ridges = JSON.parse(
-        wasm.detect_ridges(gray.data, gray.width, gray.height, JSON.stringify(ridgeParams)),
+        wasm.detect_ridges_roi(
+          gray.data,
+          gray.width,
+          gray.height,
+          JSON.stringify(roi),
+          JSON.stringify(ridgeParams),
+        ),
       ) as { x: number; y: number; direction: number; strength: number; scale: number }[];
 
       const fitterParams = {
         max_iterations: 40,
-        capture_radius: 12.0,
+        capture_radius: this.fitOpts.captureRadius,
         sample_step: 2.0,
         tikhonov: 1e-6,
         constraint_penalty: 1e-3,
+        fit_geometry: this.fitOpts.fitGeometry,
+        fit_rotation: this.fitOpts.fitRotation,
+        fit_translation: this.fitOpts.fitTranslation,
+        fit_scale: this.fitOpts.fitScale,
+        include_construction: this.fitOpts.includeConstruction,
+        robust_scale: this.fitOpts.robustScale,
+        tangent_weight: 0.1,
       };
 
-      const sketchJson = JSON.stringify(this.buildSketch());
+      const sketchObj = this.buildSketch();
+      const sketchJson = JSON.stringify(sketchObj);
       const maskStrokes = this.getMaskStrokes();
-      let resultJson: string;
-      if (maskStrokes.length > 0) {
-        const rfStrokes = maskStrokes.map((s) => ({
-          mode: s.mode === 'include' ? 'Include' : 'Exclude',
-          kind: 'Brush',
-          radius: 6.0,
-          points: s.points,
-        }));
-        const maskParams = {
-          enabled: true,
-          base_all: !maskStrokes.some((s) => s.mode === 'include'),
-          feather: 3.0,
-        };
-        resultJson = wasm.fit_sketch_masked(
-          sketchJson,
-          JSON.stringify(ridges),
-          JSON.stringify(rfStrokes),
-          JSON.stringify(maskParams),
-          gray.width,
-          gray.height,
-          JSON.stringify([0, 0, 0]),
-          JSON.stringify(fitterParams),
-        );
-      } else {
-        resultJson = wasm.fit_sketch(sketchJson, JSON.stringify(ridges), JSON.stringify([0, 0, 0]), JSON.stringify(fitterParams));
+      let resultJson = '';
+
+      // Try native backend `/api/fit` first if online
+      if ((await checkNativeBackend()) && maskStrokes.length === 0) {
+        try {
+          const resp = await fetch('/api/fit', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              sketch: sketchObj,
+              centerlines: ridges,
+              initial: [0, 0, 0],
+              params: fitterParams,
+              raster_id: getActiveRasterSession()?.raster_id,
+            }),
+          });
+          if (resp.ok) {
+            resultJson = await resp.text();
+          }
+        } catch {
+          // Fall back to WASM
+        }
       }
 
-      const result = JSON.parse(resultJson) as { params: number[]; rms_px: number; transform: [number, number, number] };
+      if (!resultJson) {
+        if (maskStrokes.length > 0) {
+          const rfStrokes = maskStrokes.map((s) => ({
+            mode: s.mode === 'include' ? 'Include' : 'Exclude',
+            kind: s.kind === 'rect' ? 'Rect' : s.kind === 'polygon' ? 'Polygon' : 'Brush',
+            radius: s.radius ?? 6.0,
+            points: s.points,
+          }));
+          const maskParams = {
+            enabled: true,
+            base_all: !maskStrokes.some((s) => s.mode === 'include'),
+            feather: 3.0,
+          };
+          resultJson = wasm.fit_sketch_masked(
+            sketchJson,
+            JSON.stringify(ridges),
+            JSON.stringify(rfStrokes),
+            JSON.stringify(maskParams),
+            gray.width,
+            gray.height,
+            JSON.stringify([0, 0, 0]),
+            JSON.stringify(fitterParams),
+          );
+        } else {
+          resultJson = wasm.fit_sketch(
+            sketchJson,
+            JSON.stringify(ridges),
+            JSON.stringify([0, 0, 0]),
+            JSON.stringify(fitterParams),
+          );
+        }
+      }
 
+      const result = JSON.parse(resultJson) as FitResponse;
+      this.lastFitJson = resultJson;
+      this.lastFit = result;
+
+      const [theta, tx, ty] = result.transform;
+      const cosT = Math.cos(theta);
+      const sinT = Math.sin(theta);
+      const mappedParams = [...result.params];
       for (let i = 0; i < this.points.length; i += 1) {
-        this.points[i].x = result.params[2 * i];
-        this.points[i].y = result.params[2 * i + 1];
+        const ptId = this.points[i].id;
+        const fixedC = this.constraints.find(
+          (c) => 'FixedPoint' in c && (c as { FixedPoint: number[] }).FixedPoint[0] === ptId,
+        ) as { FixedPoint: number[] } | undefined;
+        if (fixedC) {
+          mappedParams[2 * i] = fixedC.FixedPoint[1];
+          mappedParams[2 * i + 1] = fixedC.FixedPoint[2];
+        } else {
+          const x = result.params[2 * i];
+          const y = result.params[2 * i + 1];
+          mappedParams[2 * i] = cosT * x - sinT * y + tx;
+          mappedParams[2 * i + 1] = sinT * x + cosT * y + ty;
+        }
       }
+      const aBase = 2 * this.points.length + this.circles.length;
+      for (let k = 0; k < this.arcs.length; k += 1) {
+        mappedParams[aBase + 3 * k + 1] += theta;
+        mappedParams[aBase + 3 * k + 2] += theta;
+      }
+      this.applyParams(mappedParams);
+
       this.resultText = tf(this.locale, 'sketch.fitResult', {
         r: result.rms_px.toFixed(3),
-        t: ((result.transform[0] * 180) / Math.PI).toFixed(3),
+        t: ((theta * 180) / Math.PI).toFixed(3),
       });
       this.onStatus(this.resultText);
       this.render();
+      this.viewer.requestRender();
+      this.onChange?.();
     } catch (err) {
       this.onStatus(t(this.locale, 'error.failed'), true);
       console.error('fit failed', err);
     }
   }
 
-  clear(): void {
-    this.points = [];
-    this.pending = null;
+  cancelFitPreview(): void {
+    if (!this.preFitSnapshot) return;
+    this.viewer.setRasterTransform(this.preFitSnapshot.rasterTransform);
+    this.restoreSnapshot(this.preFitSnapshot.sketch);
+    this.preFitSnapshot = null;
+    this.lastFit = null;
     this.resultText = '';
     this.render();
-    this.onStatus(t(this.locale, 'status.ready'));
+    this.viewer.requestRender();
   }
 
-  private buildSketch(): object {
-    const points = this.points.map((p) => ({ id: p.id, x: p.x, y: p.y }));
-    const lines = [];
-    for (let i = 0; i + 1 < this.points.length; i += 2) {
-      lines.push({ id: i / 2 + 1, a: this.points[i].id, b: this.points[i + 1].id, construction: false });
+  private computeSketchRoi(
+    width: number,
+    height: number,
+    margin: number,
+  ): { x0: number; y0: number; x1: number; y1: number } {
+    if (this.points.length === 0) {
+      return { x0: 0, y0: 0, x1: width, y1: height };
     }
-    const constraints: unknown[] = [];
-    if (this.points.length >= 2) {
-      constraints.push({ Horizontal: lines[0].id });
-      constraints.push({ Distance: [this.points[0].id, this.points[1].id, 10.0] });
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    for (const p of this.points) {
+      minX = Math.min(minX, p.x);
+      minY = Math.min(minY, p.y);
+      maxX = Math.max(maxX, p.x);
+      maxY = Math.max(maxY, p.y);
     }
-    return { points, lines, circles: [], constraints };
+    for (const c of this.circles) {
+      const center = this.points.find((p) => p.id === c.center);
+      if (center) {
+        minX = Math.min(minX, center.x - c.radius);
+        minY = Math.min(minY, center.y - c.radius);
+        maxX = Math.max(maxX, center.x + c.radius);
+        maxY = Math.max(maxY, center.y + c.radius);
+      }
+    }
+    for (const a of this.arcs) {
+      const center = this.points.find((p) => p.id === a.center);
+      if (center) {
+        minX = Math.min(minX, center.x - a.radius);
+        minY = Math.min(minY, center.y - a.radius);
+        maxX = Math.max(maxX, center.x + a.radius);
+        maxY = Math.max(maxY, center.y + a.radius);
+      }
+    }
+    return {
+      x0: Math.max(0, Math.floor(minX - margin)),
+      y0: Math.max(0, Math.floor(minY - margin)),
+      x1: Math.min(width, Math.ceil(maxX + margin)),
+      y1: Math.min(height, Math.ceil(maxY + margin)),
+    };
+  }
+
+  async exportDxf(): Promise<void> {
+    const dxf = await exportSketchDxf(this.buildSketch());
+    this.downloadText(dxf, 'sketch.dxf', 'application/dxf');
+    document.documentElement.dataset.exported = 'dxf';
+  }
+
+  async exportSvg(): Promise<void> {
+    const svg = await exportSketchSvg(this.buildSketch());
+    this.downloadText(svg, 'sketch.svg', 'image/svg+xml');
+    document.documentElement.dataset.exported = 'svg';
+  }
+
+  async exportReportJson(): Promise<void> {
+    if (!this.lastFitJson) return;
+    const wasm = await loadWasm();
+    const json = wasm.fit_report_json(this.lastFitJson);
+    this.downloadText(json, 'fit-report.json', 'application/json');
+    document.documentElement.dataset.exported = 'json';
+  }
+
+  async exportReportCsv(): Promise<void> {
+    if (!this.lastFitJson) return;
+    const wasm = await loadWasm();
+    const csv = wasm.fit_report_csv(this.lastFitJson);
+    this.downloadText(csv, 'fit-report.csv', 'text/csv');
+    document.documentElement.dataset.exported = 'csv';
+  }
+
+  private downloadText(content: string, filename: string, mime: string): void {
+    const blob = new Blob([content], { type: mime });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  clear(): void {
+    this.pushUndo();
+    this.points = [];
+    this.lines = [];
+    this.circles = [];
+    this.arcs = [];
+    this.constraints = [];
+    this.referenceConstraints = [];
+    this.pending = null;
+    this.arcStartPending = null;
+    this.clearSelection();
+    this.lastSolve = null;
+    this.lastFit = null;
+    this.lastFitJson = null;
+    this.resultText = '';
+    this.render();
+    this.viewer.requestRender();
+    this.onStatus(t(this.locale, 'status.ready'));
+    this.notifyDof();
+    this.onChange?.();
+  }
+
+  private notifyDof(): void {
+    const dof = this.getDof();
+    const status =
+      this.lastSolve && this.lastSolve.conflicting.length > 0
+        ? 'conflict'
+        : dof === 0 && this.points.length > 0
+          ? 'ok'
+          : 'under';
+    this.onDofChange?.(dof, status);
+  }
+
+  buildSketch(): SavedSketchData {
+    const lines: SavedSketchLine[] =
+      this.lines.length > 0
+        ? this.lines.map((l) => ({ ...l, construction: Boolean(l.construction) }))
+        : [];
+    if (lines.length === 0 && this.points.length >= 2) {
+      for (let i = 0; i + 1 < this.points.length; i += 2) {
+        lines.push({
+          id: i / 2 + 1,
+          a: this.points[i].id,
+          b: this.points[i + 1].id,
+          construction: false,
+        });
+      }
+    }
+    const constraints = [...this.constraints];
+    return {
+      points: this.points.map((p) => ({ id: p.id, x: p.x, y: p.y })),
+      lines,
+      circles: this.circles.map((c) => ({ ...c, construction: Boolean(c.construction) })),
+      arcs: this.arcs.map((a) => ({ ...a, construction: Boolean(a.construction) })),
+      constraints,
+      reference_constraints: [...this.referenceConstraints],
+    };
+  }
+
+  /** Apply a FreeCAD Sketcher constraint to the currently selected canvas entities! */
+  /** True when the current selection satisfies the minimum requirements for `action`. */
+  private canApplyConstraintNow(action: string): boolean {
+    const p = this.selectedPoints.length;
+    const l = this.selectedLines.length;
+    const c = this.selectedCircles.length;
+    const a = this.selectedArcs.length;
+    switch (action) {
+      case 'Horizontal':
+      case 'Vertical':
+        return l > 0 || p >= 2;
+      case 'Coincident':
+        return p >= 2;
+      case 'PointOnObject':
+        return (p >= 1 && l >= 1) || (p >= 1 && c >= 1) || (p >= 1 && a >= 1);
+      case 'Parallel':
+      case 'Collinear':
+        return l >= 2;
+      case 'Perpendicular':
+        return l >= 2 || (l >= 1 && c >= 1) || (l >= 1 && a >= 1);
+      case 'Tangent':
+        return (l >= 1 && c >= 1) || (l >= 1 && a >= 1) || c >= 2 || a >= 2;
+      case 'Equal':
+        return l >= 2 || c >= 2 || a >= 2 || (c >= 1 && a >= 1);
+      case 'Symmetric':
+        return (p >= 2 && l >= 1) || p >= 3 || (p === 1 && l === 1);
+      case 'Midpoint':
+        return p >= 1 && l >= 1;
+      case 'Block':
+        return p > 0 || l > 0;
+      case 'Distance':
+        return p >= 2 || l >= 1;
+      case 'HorizontalDistance':
+      case 'VerticalDistance':
+        return p >= 2 || l >= 1;
+      case 'Radius':
+        return c >= 1 || a >= 1;
+      case 'Diameter':
+        return c >= 1;
+      case 'Angle':
+        return l >= 1;
+      default:
+        return false;
+    }
+  }
+
+  applyConstraintAction(action: string, customValueMmOrDeg?: number): void {
+    const scaleMm = this.getScaleMm();
+    const valInput = this.panel.querySelector<HTMLInputElement>('#sketch-c-val');
+    const rawVal =
+      customValueMmOrDeg !== undefined
+        ? customValueMmOrDeg
+        : valInput
+          ? Number(valInput.value)
+          : 50;
+
+    this.pushUndo();
+    let added = false;
+
+    if (action === 'Horizontal') {
+      if (this.selectedLines.length > 0) {
+        for (const lid of this.selectedLines) {
+          this.constraints.push({ Horizontal: lid });
+          added = true;
+        }
+      } else if (this.selectedPoints.length >= 2) {
+        this.constraints.push({
+          HorizontalPoints: [this.selectedPoints[0], this.selectedPoints[1]],
+        });
+        added = true;
+      }
+    } else if (action === 'Vertical') {
+      if (this.selectedLines.length > 0) {
+        for (const lid of this.selectedLines) {
+          this.constraints.push({ Vertical: lid });
+          added = true;
+        }
+      } else if (this.selectedPoints.length >= 2) {
+        this.constraints.push({
+          VerticalPoints: [this.selectedPoints[0], this.selectedPoints[1]],
+        });
+        added = true;
+      }
+    } else if (action === 'Coincident') {
+      if (this.selectedPoints.length >= 2) {
+        this.constraints.push({ Coincident: [this.selectedPoints[0], this.selectedPoints[1]] });
+        added = true;
+      }
+    } else if (action === 'PointOnObject') {
+      if (this.selectedPoints.length >= 1 && this.selectedLines.length >= 1) {
+        this.constraints.push({ PointOnLine: [this.selectedPoints[0], this.selectedLines[0]] });
+        added = true;
+      } else if (this.selectedPoints.length >= 1 && this.selectedCircles.length >= 1) {
+        this.constraints.push({
+          PointOnCircle: [this.selectedPoints[0], this.selectedCircles[0]],
+        });
+        added = true;
+      } else if (this.selectedPoints.length >= 1 && this.selectedArcs.length >= 1) {
+        this.constraints.push({ PointOnArc: [this.selectedPoints[0], this.selectedArcs[0]] });
+        added = true;
+      }
+    } else if (action === 'Parallel') {
+      if (this.selectedLines.length >= 2) {
+        this.constraints.push({ Parallel: [this.selectedLines[0], this.selectedLines[1]] });
+        added = true;
+      }
+    } else if (action === 'Perpendicular') {
+      if (this.selectedLines.length >= 2) {
+        this.constraints.push({ Perpendicular: [this.selectedLines[0], this.selectedLines[1]] });
+        added = true;
+      } else if (this.selectedLines.length >= 1 && this.selectedCircles.length >= 1) {
+        this.constraints.push({
+          PerpendicularLineCircle: [this.selectedLines[0], this.selectedCircles[0]],
+        });
+        added = true;
+      } else if (this.selectedLines.length >= 1 && this.selectedArcs.length >= 1) {
+        this.constraints.push({
+          PerpendicularLineArc: [this.selectedLines[0], this.selectedArcs[0]],
+        });
+        added = true;
+      }
+    } else if (action === 'Tangent') {
+      if (this.selectedLines.length >= 1 && this.selectedCircles.length >= 1) {
+        this.constraints.push({
+          TangentLineCircle: [this.selectedLines[0], this.selectedCircles[0]],
+        });
+        added = true;
+      } else if (this.selectedLines.length >= 1 && this.selectedArcs.length >= 1) {
+        this.constraints.push({ TangentLineArc: [this.selectedLines[0], this.selectedArcs[0]] });
+        added = true;
+      } else if (this.selectedCircles.length >= 2) {
+        this.constraints.push({
+          TangentCircleCircle: [this.selectedCircles[0], this.selectedCircles[1]],
+        });
+        added = true;
+      } else if (this.selectedArcs.length >= 2) {
+        this.constraints.push({ TangentArcArc: [this.selectedArcs[0], this.selectedArcs[1]] });
+        added = true;
+      }
+    } else if (action === 'Equal') {
+      if (this.selectedLines.length >= 2) {
+        this.constraints.push({ EqualLength: [this.selectedLines[0], this.selectedLines[1]] });
+        added = true;
+      } else if (this.selectedCircles.length >= 2) {
+        this.constraints.push({ EqualRadius: [this.selectedCircles[0], this.selectedCircles[1]] });
+        added = true;
+      } else if (this.selectedArcs.length >= 2) {
+        this.constraints.push({ EqualRadiusArc: [this.selectedArcs[0], this.selectedArcs[1]] });
+        added = true;
+      } else if (this.selectedCircles.length >= 1 && this.selectedArcs.length >= 1) {
+        this.constraints.push({
+          EqualRadiusCircleArc: [this.selectedCircles[0], this.selectedArcs[0]],
+        });
+        added = true;
+      }
+    } else if (action === 'Symmetric') {
+      if (this.selectedPoints.length >= 2 && this.selectedLines.length >= 1) {
+        this.constraints.push({
+          Symmetric: [this.selectedPoints[0], this.selectedPoints[1], this.selectedLines[0]],
+        });
+        added = true;
+      } else if (this.selectedPoints.length >= 3) {
+        this.constraints.push({
+          SymmetricPoints: [
+            this.selectedPoints[0],
+            this.selectedPoints[1],
+            this.selectedPoints[2],
+          ],
+        });
+        added = true;
+      } else if (this.selectedPoints.length === 1 && this.selectedLines.length === 1) {
+        this.constraints.push({ Midpoint: [this.selectedPoints[0], this.selectedLines[0]] });
+        added = true;
+      }
+    } else if (action === 'Midpoint') {
+      if (this.selectedPoints.length >= 1 && this.selectedLines.length >= 1) {
+        this.constraints.push({ Midpoint: [this.selectedPoints[0], this.selectedLines[0]] });
+        added = true;
+      }
+    } else if (action === 'Collinear') {
+      if (this.selectedLines.length >= 2) {
+        this.constraints.push({ Collinear: [this.selectedLines[0], this.selectedLines[1]] });
+        added = true;
+      }
+    } else if (action === 'Block') {
+      if (this.selectedPoints.length > 0) {
+        for (const pid of this.selectedPoints) {
+          const pt = this.points.find((p) => p.id === pid);
+          if (pt) {
+            if (this.rasterSnapEnabled && this.grayCache) {
+              const rSnap = this.snapRasterPoint({ x: pt.x, y: pt.y }, false);
+              if (rSnap.snapped) {
+                pt.x = rSnap.x;
+                pt.y = rSnap.y;
+              }
+            }
+            this.setPointFixedToRaster(pt.id, pt.x, pt.y);
+            added = true;
+          }
+        }
+      } else if (this.selectedLines.length > 0) {
+        for (const lid of this.selectedLines) {
+          const l = this.lines.find((x) => x.id === lid);
+          if (l) {
+            const pa = this.points.find((p) => p.id === l.a);
+            const pb = this.points.find((p) => p.id === l.b);
+            if (pa && pb) {
+              this.setPointFixedToRaster(pa.id, pa.x, pa.y);
+              this.setPointFixedToRaster(pb.id, pb.x, pb.y);
+              added = true;
+            }
+          }
+        }
+      }
+    } else if (action === 'Distance') {
+      const dInternal = rawVal / scaleMm;
+      if (this.selectedPoints.length >= 2) {
+        this.constraints.push({
+          Distance: [this.selectedPoints[0], this.selectedPoints[1], dInternal],
+        });
+        added = true;
+      } else if (this.selectedPoints.length === 1 && this.selectedLines.length === 1) {
+        this.constraints.push({
+          DistancePointLine: [this.selectedPoints[0], this.selectedLines[0], dInternal],
+        });
+        added = true;
+      } else if (this.selectedLines.length >= 1) {
+        this.constraints.push({ LineLength: [this.selectedLines[0], dInternal] });
+        added = true;
+      }
+    } else if (action === 'HorizontalDistance' || action === 'VerticalDistance') {
+      const dInternal = rawVal / scaleMm;
+      let p1: number | undefined;
+      let p2: number | undefined;
+      if (this.selectedPoints.length >= 2) {
+        [p1, p2] = this.selectedPoints;
+      } else if (this.selectedLines.length >= 1) {
+        const l = this.lines.find((x) => x.id === this.selectedLines[0]);
+        if (l) {
+          p1 = l.a;
+          p2 = l.b;
+        }
+      }
+      if (p1 !== undefined && p2 !== undefined) {
+        this.constraints.push(
+          action === 'HorizontalDistance'
+            ? { HorizontalDistance: [p1, p2, dInternal] }
+            : { VerticalDistance: [p1, p2, dInternal] },
+        );
+        added = true;
+      }
+    } else if (action === 'Radius') {
+      const rInternal = rawVal / scaleMm;
+      if (this.selectedCircles.length >= 1) {
+        this.constraints.push({ Radius: [this.selectedCircles[0], rInternal] });
+        added = true;
+      } else if (this.selectedArcs.length >= 1) {
+        this.constraints.push({ ArcRadius: [this.selectedArcs[0], rInternal] });
+        added = true;
+      }
+    } else if (action === 'Diameter') {
+      const dInternal = rawVal / scaleMm;
+      if (this.selectedCircles.length >= 1) {
+        this.constraints.push({ Diameter: [this.selectedCircles[0], dInternal] });
+        added = true;
+      }
+    } else if (action === 'Angle') {
+      const rad = (rawVal * Math.PI) / 180;
+      if (this.selectedLines.length >= 2) {
+        this.constraints.push({ Angle: [this.selectedLines[0], this.selectedLines[1], rad] });
+        added = true;
+      } else if (this.selectedLines.length === 1) {
+        this.constraints.push({ AngleLine: [this.selectedLines[0], rad] });
+        added = true;
+      }
+    }
+
+    if (!added) {
+      this.undoStack.pop();
+      this.onStatus(t(this.locale, 'sketch.selectForConstraint'), true);
+      return;
+    }
+
+    void this.solve();
+  }
+
+  private addConstraintFromUi(type: string, e1: number, e2: number, val: number): void {
+    const scaleMm = this.getScaleMm();
+    this.pushUndo();
+    switch (type) {
+      case 'Horizontal':
+        this.constraints.push({ Horizontal: e1 });
+        break;
+      case 'Vertical':
+        this.constraints.push({ Vertical: e1 });
+        break;
+      case 'HorizontalPoints':
+        this.constraints.push({ HorizontalPoints: [e1, e2] });
+        break;
+      case 'VerticalPoints':
+        this.constraints.push({ VerticalPoints: [e1, e2] });
+        break;
+      case 'Coincident':
+        this.constraints.push({ Coincident: [e1, e2] });
+        break;
+      case 'PointOnLine':
+        this.constraints.push({ PointOnLine: [e1, e2] });
+        break;
+      case 'PointOnCircle':
+        this.constraints.push({ PointOnCircle: [e1, e2] });
+        break;
+      case 'Parallel':
+        this.constraints.push({ Parallel: [e1, e2] });
+        break;
+      case 'Perpendicular':
+        this.constraints.push({ Perpendicular: [e1, e2] });
+        break;
+      case 'TangentLineCircle':
+        this.constraints.push({ TangentLineCircle: [e1, e2] });
+        break;
+      case 'EqualLength':
+        this.constraints.push({ EqualLength: [e1, e2] });
+        break;
+      case 'EqualRadius':
+        this.constraints.push({ EqualRadius: [e1, e2] });
+        break;
+      case 'LineLength':
+        this.constraints.push({ LineLength: [e1, val / scaleMm] });
+        break;
+      case 'Distance':
+        this.constraints.push({ Distance: [e1, e2, val / scaleMm] });
+        break;
+      case 'DistancePointLine':
+        this.constraints.push({ DistancePointLine: [e1, e2, val / scaleMm] });
+        break;
+      case 'HorizontalDistance':
+        this.constraints.push({ HorizontalDistance: [e1, e2, val / scaleMm] });
+        break;
+      case 'VerticalDistance':
+        this.constraints.push({ VerticalDistance: [e1, e2, val / scaleMm] });
+        break;
+      case 'Radius':
+        this.constraints.push({ Radius: [e1, val / scaleMm] });
+        break;
+      case 'Diameter':
+        this.constraints.push({ Diameter: [e1, val / scaleMm] });
+        break;
+      case 'Angle':
+        this.constraints.push({ Angle: [e1, e2, (val * Math.PI) / 180] });
+        break;
+      case 'AngleLine':
+        this.constraints.push({ AngleLine: [e1, (val * Math.PI) / 180] });
+        break;
+      case 'Midpoint':
+        this.constraints.push({ Midpoint: [e1, e2] });
+        break;
+      case 'Collinear':
+        this.constraints.push({ Collinear: [e1, e2] });
+        break;
+      case 'FixedPoint': {
+        const pt = this.points.find((p) => p.id === e1);
+        this.constraints.push({ FixedPoint: [e1, pt ? pt.x : 0, pt ? pt.y : 0] });
+        break;
+      }
+    }
+    void this.solve();
   }
 
   private render(): void {
     const locale = this.locale;
+    const dof = this.getDof();
+    const redundant = this.lastSolve?.redundant ?? [];
+    const conflicting = this.lastSolve?.conflicting ?? [];
+
+    const solverBannerHtml =
+      conflicting.length > 0
+        ? `<button id="sketch-remove-conflict" class="btn" style="width:100%;border-color:#dc2626;color:#dc2626;margin-bottom:6px" type="button">⚠ ${tf(locale, 'sketch.conflictWarn', { list: conflicting.map((i) => `#${i + 1}`).join(', ') })}</button>`
+        : redundant.length > 0
+          ? `<button id="sketch-remove-redundant" class="btn" style="width:100%;border-color:#b54708;color:#b54708;margin-bottom:6px" type="button">⚠ ${tf(locale, 'sketch.redundantWarn', { list: redundant.map((i) => `#${i + 1}`).join(', ') })}</button>`
+          : dof === 0 && this.points.length > 0
+            ? `<div style="padding:4px 8px;margin-bottom:6px;border-radius:4px;background:rgba(22,163,74,0.12);color:#16a34a;font-size:12px;font-weight:600">✓ ${t(locale, 'sketch.fullyConstrained')}</div>`
+            : `<div style="padding:4px 8px;margin-bottom:6px;border-radius:4px;background:rgba(36,101,199,0.08);font-size:12px">${tf(locale, 'sketch.underConstrained', { dof })}</div>`;
+
+    const selectionSummary = [
+      ...this.selectedPoints.map((id) => `Pt#${id}`),
+      ...this.selectedLines.map((id) => `Ln#${id}`),
+      ...this.selectedCircles.map((id) => `Cir#${id}`),
+      ...this.selectedArcs.map((id) => `Arc#${id}`),
+    ].join(', ');
+
+    const constraintsHtml = this.constraints
+      .map((c, idx) => {
+        const key = Object.keys(c)[0] ?? 'Constraint';
+        const val = JSON.stringify((c as Record<string, unknown>)[key]);
+        const isRef = this.referenceConstraints.includes(idx);
+        const isConflict = conflicting.includes(idx);
+        const isRedundant = redundant.includes(idx);
+        return `
+          <li class="cal-segment" style="${isConflict ? 'color:#dc2626;font-weight:600' : isRedundant ? 'color:#b54708' : ''}">
+            <input type="checkbox" class="sketch-c-ref" data-index="${idx}" ${!isRef ? 'checked' : ''} title="Driving" />
+            <span class="cal-label">#${idx + 1} ${escapeHtml(key)} ${escapeHtml(val)}</span>
+            <button class="sketch-c-del tool-btn cal-delete" type="button" data-index="${idx}" aria-label="Delete">×</button>
+          </li>`;
+      })
+      .join('');
+
+    const elementsHtml = [
+      ...this.lines.map(
+        (l) =>
+          `<li class="cal-segment"><span class="cal-label">Line #${l.id} (P${l.a}→P${l.b})${l.construction ? ' [C]' : ''}</span><button class="sketch-el-sel btn" type="button" data-kind="line" data-id="${l.id}">${this.selectedLines.includes(l.id) ? '✓' : 'Sel'}</button></li>`,
+      ),
+      ...this.circles.map(
+        (c) =>
+          `<li class="cal-segment"><span class="cal-label">Circle #${c.id} (R=${c.radius.toFixed(1)})${c.construction ? ' [C]' : ''}</span><button class="sketch-el-sel btn" type="button" data-kind="circle" data-id="${c.id}">${this.selectedCircles.includes(c.id) ? '✓' : 'Sel'}</button></li>`,
+      ),
+      ...this.arcs.map(
+        (a) =>
+          `<li class="cal-segment"><span class="cal-label">Arc #${a.id} (R=${a.radius.toFixed(1)})${a.construction ? ' [C]' : ''}</span><button class="sketch-el-sel btn" type="button" data-kind="arc" data-id="${a.id}">${this.selectedArcs.includes(a.id) ? '✓' : 'Sel'}</button></li>`,
+      ),
+    ].join('');
+
+    const orig = this.viewer.getOrigin();
+
     this.panel.innerHTML = `
       <div class="panel-head">
         <h2 class="panel-title">${t(locale, 'sketch.title')}</h2>
         <button id="sketch-close" class="tool-btn" type="button" aria-label="${t(locale, 'calibrate.close')}">×</button>
       </div>
-      <p class="cal-hint">${t(locale, 'sketch.hint')}</p>
-      <div class="cal-actions">
-        <button id="sketch-solve" class="btn btn-primary" type="button">${t(locale, 'sketch.solve')}</button>
-        <button id="sketch-fit" class="btn" type="button">${t(locale, 'sketch.fit')}</button>
-        <button id="sketch-clear" class="btn" type="button">${t(locale, 'sketch.clear')}</button>
+      ${solverBannerHtml}
+      <p class="cal-hint">${selectionSummary ? `Sel: ${escapeHtml(selectionSummary)}` : t(locale, this.pending || this.arcStartPending || this.arc3PtPending ? 'sketch.finishChain' : 'sketch.hint')}</p>
+
+      <div class="sketch-toolbar-box" role="group" aria-label="Selection & Coordinate System Toolbar">
+        <div class="sketch-toolbar-title">1 · Selection & Coordinate System (0,0)</div>
+        <div class="cal-actions">
+          <button id="sketch-tool-select" class="btn ${this.tool === 'select' ? 'btn-primary' : ''}" type="button" title="${t(locale, 'sketch.tool.select')}">↖ Select / Move (V)</button>
+          <button id="sketch-tool-origin" class="btn ${this.tool === 'origin' ? 'btn-primary' : ''}" type="button" title="Move (0,0) Coordinate System Origin">🎯 Set (0,0) [${Math.round(orig.x)}, ${Math.round(orig.y)}]</button>
+          <button id="sketch-origin-reset" class="btn" type="button" title="Reset (0,0) to bottom-left corner of raster">↺ (0,0) Bottom-Left</button>
+          <button id="sketch-undo" class="btn" type="button" title="${t(locale, 'sketch.undo')}">↶</button>
+          <button id="sketch-redo" class="btn" type="button" title="${t(locale, 'sketch.redo')}">↷</button>
+          <button id="sketch-delete" class="btn" type="button" title="${t(locale, 'sketch.delete')}">🗑</button>
+        </div>
+        <div class="cal-actions">
+          <label class="cal-label"><input id="sketch-raster-snap" type="checkbox" ${this.rasterSnapEnabled ? 'checked' : ''} /> 🧲 Raster Snap</label>
+          <label class="cal-label"><input id="sketch-pin-raster" type="checkbox" ${this.autoPinRaster ? 'checked' : ''} /> 📌 Pin to Raster</label>
+          <label class="cal-label"><input id="sketch-loupe" type="checkbox" ${this.loupeEnabled ? 'checked' : ''} /> 🔍 8×</label>
+          <label class="cal-label"><input id="sketch-construction" type="checkbox" ${this.constructionMode ? 'checked' : ''} /> ${t(locale, 'sketch.construction')}</label>
+          <label class="cal-label"><input id="sketch-auto" type="checkbox" ${this.autoConstraints ? 'checked' : ''} /> ${t(locale, 'sketch.autoConstraint')}</label>
+          <label class="cal-label"><input id="sketch-grid-snap" type="checkbox" ${this.viewer.isGridSnapEnabled() ? 'checked' : ''} /> ${t(locale, 'sketch.gridSnap')}</label>
+        </div>
       </div>
+
+      <div class="sketch-toolbar-box" role="group" aria-label="Geometry Tools">
+        <div class="sketch-toolbar-title">2 · Draw & Modify Geometry</div>
+        <div class="cal-actions">
+          <button id="sketch-tool-polyline" class="btn ${this.tool === 'polyline' ? 'btn-primary' : ''}" type="button" title="${t(locale, 'sketch.tool.polyline')}">Polyline (P)</button>
+          <button id="sketch-tool-line" class="btn ${this.tool === 'line' ? 'btn-primary' : ''}" type="button" title="${t(locale, 'sketch.tool.line')}">╱ Line (L)</button>
+          <button id="sketch-tool-rect" class="btn ${this.tool === 'rect' ? 'btn-primary' : ''}" type="button" title="${t(locale, 'sketch.tool.rect')}">▭ Rect (R)</button>
+          <button id="sketch-tool-center-rect" class="btn ${this.tool === 'centerRect' ? 'btn-primary' : ''}" type="button" title="${t(locale, 'sketch.tool.centerRect')}">⊡ C-Rect</button>
+          <button id="sketch-tool-slot" class="btn ${this.tool === 'slot' ? 'btn-primary' : ''}" type="button" title="${t(locale, 'sketch.tool.slot')}">⬭ Slot (S)</button>
+          <button id="sketch-tool-circle" class="btn ${this.tool === 'circle' ? 'btn-primary' : ''}" type="button" title="${t(locale, 'sketch.tool.circle')}">◯ Circle (C)</button>
+          <button id="sketch-tool-arc" class="btn ${this.tool === 'arc' ? 'btn-primary' : ''}" type="button" title="Center-Start-End Arc (A)">◜ Arc C-S-E (A)</button>
+          <button id="sketch-tool-arc3pt" class="btn ${this.tool === 'arc3pt' ? 'btn-primary' : ''}" type="button" title="3-Point Rim Arc (Shift+A or M)">⌒ 3-Pt Arc</button>
+          <button id="sketch-tool-polygon" class="btn ${this.tool === 'polygon' ? 'btn-primary' : ''}" type="button" title="${t(locale, 'sketch.tool.polygon')}">⬡ Poly (G)</button>
+          <button id="sketch-tool-fillet" class="btn ${this.tool === 'fillet' ? 'btn-primary' : ''}" type="button" title="${t(locale, 'sketch.tool.fillet')}">╭ Fillet (F)</button>
+          <button id="sketch-tool-trim" class="btn ${this.tool === 'trim' ? 'btn-primary' : ''}" type="button" title="${t(locale, 'sketch.tool.trim')}">✂ Trim (T)</button>
+          <button id="sketch-tool-point" class="btn ${this.tool === 'point' ? 'btn-primary' : ''}" type="button" title="${t(locale, 'sketch.tool.point')}">• Point (O)</button>
+        </div>
+        ${
+          this.pending || this.arcStartPending || this.arc3PtPending
+            ? `<div class="cal-actions"><button id="sketch-finish-chain" class="btn btn-primary" type="button">${t(locale, 'sketch.finishChain')}</button></div>`
+            : ''
+        }
+      </div>
+
+      <div class="sketch-toolbar-box" role="group" aria-label="Geometric Constraints">
+        <div class="sketch-toolbar-title">3 · Geometric Constraints</div>
+        <div class="cal-actions">
+          <button class="btn sketch-fc-c" data-action="Coincident" type="button" title="Coincident (2 pts)">● Coinc</button>
+          <button class="btn sketch-fc-c" data-action="PointOnObject" type="button" title="Point on Object">⟐ OnObj</button>
+          <button class="btn sketch-fc-c" data-action="Horizontal" type="button" title="Horizontal (H)">━ H</button>
+          <button class="btn sketch-fc-c" data-action="Vertical" type="button" title="Vertical">┃ V</button>
+          <button class="btn sketch-fc-c" data-action="Parallel" type="button" title="Parallel">∥ Par</button>
+          <button class="btn sketch-fc-c" data-action="Perpendicular" type="button" title="Perpendicular (N)">⊥ Perp</button>
+          <button class="btn sketch-fc-c" data-action="Tangent" type="button" title="Tangent">⌓ Tan</button>
+          <button class="btn sketch-fc-c" data-action="Equal" type="button" title="Equal (E)">= Eq</button>
+          <button class="btn sketch-fc-c" data-action="Symmetric" type="button" title="Symmetric">>< Sym</button>
+          <button class="btn sketch-fc-c" data-action="Midpoint" type="button" title="Midpoint">M Mid</button>
+          <button class="btn sketch-fc-c" data-action="Collinear" type="button" title="Collinear">∥ Col</button>
+          <button class="btn sketch-fc-c" data-action="Block" type="button" title="Block / Fix to Raster (B)">🔒 Fix</button>
+        </div>
+      </div>
+
+      <div class="sketch-toolbar-box" role="group" aria-label="Dimensional Constraints">
+        <div class="sketch-toolbar-title">4 · Dimensional Constraints</div>
+        <div class="cal-actions">
+          <button class="btn sketch-fc-c" data-action="Distance" type="button" title="Distance / Length (D)">↔ Dist</button>
+          <button class="btn sketch-fc-c" data-action="HorizontalDistance" type="button" title="Horizontal Distance">ΔX</button>
+          <button class="btn sketch-fc-c" data-action="VerticalDistance" type="button" title="Vertical Distance">ΔY</button>
+          <button class="btn sketch-fc-c" data-action="Radius" type="button" title="Radius">R Rad</button>
+          <button class="btn sketch-fc-c" data-action="Diameter" type="button" title="Diameter">⌀ Dia</button>
+          <button class="btn sketch-fc-c" data-action="Angle" type="button" title="Angle">∠ Ang</button>
+        </div>
+        <div class="cal-actions">
+          <select id="sketch-c-type" class="cal-orientation" aria-label="${t(locale, 'sketch.constraints')}">
+            <option value="Horizontal">Horizontal (line)</option>
+            <option value="Vertical">Vertical (line)</option>
+            <option value="HorizontalPoints">Horizontal (p1, p2)</option>
+            <option value="VerticalPoints">Vertical (p1, p2)</option>
+            <option value="LineLength">LineLength (line, d)</option>
+            <option value="Distance">Distance (p1, p2, d)</option>
+            <option value="DistancePointLine">DistPtLine (pt, line, d)</option>
+            <option value="HorizontalDistance">Horiz Dist (p1, p2, d)</option>
+            <option value="VerticalDistance">Vert Dist (p1, p2, d)</option>
+            <option value="Parallel">Parallel (l1, l2)</option>
+            <option value="Perpendicular">Perpendicular (l1, l2)</option>
+            <option value="TangentLineCircle">Tangent (line, circle)</option>
+            <option value="EqualLength">EqualLength (l1, l2)</option>
+            <option value="EqualRadius">EqualRadius (c1, c2)</option>
+            <option value="Coincident">Coincident (p1, p2)</option>
+            <option value="PointOnLine">PointOnLine (pt, line)</option>
+            <option value="PointOnCircle">PointOnCircle (pt, circle)</option>
+            <option value="Midpoint">Midpoint (pt, line)</option>
+            <option value="Collinear">Collinear (l1, l2)</option>
+            <option value="Radius">Radius (circle, r)</option>
+            <option value="Diameter">Diameter (circle, d)</option>
+            <option value="Angle">Angle (l1, l2, deg)</option>
+            <option value="AngleLine">AngleLine (line, deg)</option>
+            <option value="FixedPoint">FixedPoint (pt)</option>
+          </select>
+          <input id="sketch-c-e1" class="cal-length" style="width:38px" type="number" value="1" aria-label="ID 1" />
+          <input id="sketch-c-e2" class="cal-length" style="width:38px" type="number" value="2" aria-label="ID 2" />
+          <input id="sketch-c-val" class="cal-length" style="width:54px" type="number" value="50" aria-label="Value" />
+          <button id="sketch-c-add" class="btn" type="button">+</button>
+        </div>
+      </div>
+
+      <div class="sketch-toolbar-box" role="group" aria-label="Solver, Fit & Export">
+        <div class="sketch-toolbar-title">5 · Solver, RasterFit & Export</div>
+        <div class="cal-actions">
+          <button id="sketch-solve" class="btn btn-primary" type="button">${t(locale, 'sketch.solve')}</button>
+          <button id="sketch-fit" class="btn" type="button">${t(locale, 'sketch.fit')}</button>
+          <button id="sketch-fit-preview" class="btn" type="button">${t(locale, 'sketch.fitPreview')}</button>
+          ${this.preFitSnapshot ? `<button id="sketch-fit-cancel" class="btn" type="button">${t(locale, 'sketch.fitCancel')}</button>` : ''}
+          <button id="sketch-clear" class="btn" type="button">${t(locale, 'sketch.clear')}</button>
+        </div>
+        <div class="cal-actions">
+          <button id="export-dxf" class="btn" type="button">${t(locale, 'sketch.exportDxf')}</button>
+          <button id="export-svg" class="btn" type="button">${t(locale, 'sketch.exportSvg')}</button>
+          <button id="export-json" class="btn" type="button">${t(locale, 'sketch.exportJson')}</button>
+          <button id="export-csv" class="btn" type="button">${t(locale, 'sketch.exportCsv')}</button>
+        </div>
+      </div>
+
+      <details style="margin-bottom:8px">
+        <summary class="cal-subhead" style="cursor:pointer">${t(locale, 'sketch.fitDialog')}</summary>
+        <div class="cal-actions" style="margin-top:6px">
+          <label class="cal-label"><input id="fit-opt-geom" type="checkbox" ${this.fitOpts.fitGeometry ? 'checked' : ''} /> ${t(locale, 'sketch.fitGeometry')}</label>
+          <label class="cal-label"><input id="fit-opt-rot" type="checkbox" ${this.fitOpts.fitRotation ? 'checked' : ''} /> ${t(locale, 'sketch.fitRotation')}</label>
+          <label class="cal-label"><input id="fit-opt-trans" type="checkbox" ${this.fitOpts.fitTranslation ? 'checked' : ''} /> ${t(locale, 'sketch.fitTranslation')}</label>
+          <label class="cal-label"><input id="fit-opt-scale" type="checkbox" ${this.fitOpts.fitScale ? 'checked' : ''} /> ${t(locale, 'sketch.fitScale')}</label>
+          <label class="cal-label"><input id="fit-opt-const" type="checkbox" ${this.fitOpts.includeConstruction ? 'checked' : ''} /> ${t(locale, 'sketch.construction')}</label>
+        </div>
+      </details>
+
+      ${constraintsHtml ? `<ol class="cal-segments">${constraintsHtml}</ol>` : ''}
+      ${elementsHtml ? `<details style="margin-bottom:8px"><summary class="cal-subhead" style="cursor:pointer">${t(locale, 'sketch.elements')} (${this.lines.length + this.circles.length + this.arcs.length})</summary><ol class="cal-segments">${elementsHtml}</ol></details>` : ''}
+
       <p class="cal-empty" id="sketch-result">${escapeHtml(this.resultText)}</p>
     `;
 
     this.panel.querySelector('#sketch-close')!.addEventListener('click', () => this.deactivate());
+    this.panel.querySelector('#sketch-tool-polyline')!.addEventListener('click', () => this.setTool('polyline'));
+    this.panel.querySelector('#sketch-tool-line')!.addEventListener('click', () => this.setTool('line'));
+    this.panel.querySelector('#sketch-tool-rect')!.addEventListener('click', () => this.setTool('rect'));
+    this.panel.querySelector('#sketch-tool-center-rect')!.addEventListener('click', () => this.setTool('centerRect'));
+    this.panel.querySelector('#sketch-tool-slot')!.addEventListener('click', () => this.setTool('slot'));
+    this.panel.querySelector('#sketch-tool-circle')!.addEventListener('click', () => this.setTool('circle'));
+    this.panel.querySelector('#sketch-tool-arc')!.addEventListener('click', () => this.setTool('arc'));
+    this.panel.querySelector('#sketch-tool-arc3pt')!.addEventListener('click', () => this.setTool('arc3pt'));
+    this.panel.querySelector('#sketch-tool-polygon')!.addEventListener('click', () => this.setTool('polygon'));
+    this.panel.querySelector('#sketch-tool-fillet')!.addEventListener('click', () => this.setTool('fillet'));
+    this.panel.querySelector('#sketch-tool-trim')!.addEventListener('click', () => this.setTool('trim'));
+    this.panel.querySelector('#sketch-tool-point')!.addEventListener('click', () => this.setTool('point'));
+    this.panel.querySelector('#sketch-tool-select')!.addEventListener('click', () => this.setTool('select'));
+    this.panel.querySelector('#sketch-tool-origin')!.addEventListener('click', () => this.setTool('origin'));
+    this.panel.querySelector('#sketch-origin-reset')!.addEventListener('click', () => {
+      this.viewer.resetOrigin();
+      const o = this.viewer.getOrigin();
+      this.onStatus(`(0,0) → (${o.x.toFixed(0)}, ${o.y.toFixed(0)}) px`);
+      this.render();
+    });
+
+    this.panel.querySelector('#sketch-finish-chain')?.addEventListener('click', () => {
+      this.finishChain();
+    });
+    this.panel.querySelector('#sketch-remove-conflict')?.addEventListener('click', () => {
+      if (conflicting.length > 0) {
+        this.pushUndo();
+        this.constraints.splice(conflicting[conflicting.length - 1], 1);
+        void this.solve();
+      }
+    });
+    this.panel.querySelector('#sketch-remove-redundant')?.addEventListener('click', () => {
+      if (redundant.length > 0) {
+        this.pushUndo();
+        this.constraints.splice(redundant[redundant.length - 1], 1);
+        void this.solve();
+      }
+    });
+
+    this.panel.querySelector<HTMLInputElement>('#sketch-raster-snap')?.addEventListener('change', (e) => {
+      this.rasterSnapEnabled = (e.target as HTMLInputElement).checked;
+      this.viewer.requestRender();
+    });
+    this.panel.querySelector<HTMLInputElement>('#sketch-pin-raster')?.addEventListener('change', (e) => {
+      this.autoPinRaster = (e.target as HTMLInputElement).checked;
+    });
+    this.panel.querySelector<HTMLInputElement>('#sketch-loupe')?.addEventListener('change', (e) => {
+      this.loupeEnabled = (e.target as HTMLInputElement).checked;
+      this.viewer.requestRender();
+    });
+    this.panel.querySelector<HTMLInputElement>('#sketch-construction')!.addEventListener('change', (e) => {
+      this.constructionMode = (e.target as HTMLInputElement).checked;
+    });
+    this.panel.querySelector<HTMLInputElement>('#sketch-auto')!.addEventListener('change', (e) => {
+      this.autoConstraints = (e.target as HTMLInputElement).checked;
+    });
+    this.panel.querySelector<HTMLInputElement>('#sketch-grid-snap')!.addEventListener('change', (e) => {
+      this.viewer.setGridSnapEnabled((e.target as HTMLInputElement).checked);
+    });
+
+    this.panel.querySelectorAll<HTMLButtonElement>('.sketch-fc-c').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const action = btn.dataset.action;
+        if (action) this.applyConstraintAction(action);
+      });
+    });
+
+    this.panel.querySelectorAll<HTMLButtonElement>('.sketch-el-sel').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const kind = btn.dataset.kind;
+        const id = Number(btn.dataset.id);
+        if (kind === 'line') toggleInArray(this.selectedLines, id);
+        else if (kind === 'circle') toggleInArray(this.selectedCircles, id);
+        else if (kind === 'arc') toggleInArray(this.selectedArcs, id);
+        this.render();
+        this.viewer.requestRender();
+      });
+    });
+
     this.panel.querySelector('#sketch-solve')!.addEventListener('click', () => void this.solve());
-    this.panel.querySelector('#sketch-fit')!.addEventListener('click', () => void this.fit());
+    this.panel.querySelector('#sketch-fit')!.addEventListener('click', () => void this.fit(false));
+    this.panel.querySelector('#sketch-fit-preview')!.addEventListener('click', () => void this.fit(true));
+    this.panel.querySelector('#sketch-fit-cancel')?.addEventListener('click', () => this.cancelFitPreview());
+    this.panel.querySelector('#sketch-undo')!.addEventListener('click', () => this.undo());
+    this.panel.querySelector('#sketch-redo')!.addEventListener('click', () => this.redo());
+    this.panel.querySelector('#sketch-delete')!.addEventListener('click', () => this.deleteSelected());
     this.panel.querySelector('#sketch-clear')!.addEventListener('click', () => this.clear());
+
+    this.panel.querySelector<HTMLInputElement>('#fit-opt-geom')?.addEventListener('change', (e) => {
+      this.fitOpts.fitGeometry = (e.target as HTMLInputElement).checked;
+    });
+    this.panel.querySelector<HTMLInputElement>('#fit-opt-rot')?.addEventListener('change', (e) => {
+      this.fitOpts.fitRotation = (e.target as HTMLInputElement).checked;
+    });
+    this.panel.querySelector<HTMLInputElement>('#fit-opt-trans')?.addEventListener('change', (e) => {
+      this.fitOpts.fitTranslation = (e.target as HTMLInputElement).checked;
+    });
+    this.panel.querySelector<HTMLInputElement>('#fit-opt-scale')?.addEventListener('change', (e) => {
+      this.fitOpts.fitScale = (e.target as HTMLInputElement).checked;
+    });
+    this.panel.querySelector<HTMLInputElement>('#fit-opt-const')?.addEventListener('change', (e) => {
+      this.fitOpts.includeConstruction = (e.target as HTMLInputElement).checked;
+    });
+
+    this.panel.querySelector('#sketch-c-add')!.addEventListener('click', () => {
+      const type = (this.panel.querySelector('#sketch-c-type') as HTMLSelectElement).value;
+      const e1 = Number((this.panel.querySelector('#sketch-c-e1') as HTMLInputElement).value);
+      const e2 = Number((this.panel.querySelector('#sketch-c-e2') as HTMLInputElement).value);
+      const val = Number((this.panel.querySelector('#sketch-c-val') as HTMLInputElement).value);
+      this.addConstraintFromUi(type, e1, e2, val);
+    });
+
+    this.panel.querySelectorAll<HTMLInputElement>('.sketch-c-ref').forEach((el) => {
+      const idx = Number(el.dataset.index);
+      el.addEventListener('change', () => {
+        if (el.checked) {
+          this.referenceConstraints = this.referenceConstraints.filter((i) => i !== idx);
+        } else if (!this.referenceConstraints.includes(idx)) {
+          this.referenceConstraints.push(idx);
+        }
+        void this.solveSilent();
+        this.viewer.requestRender();
+        this.onChange?.();
+      });
+    });
+
+    this.panel.querySelectorAll<HTMLButtonElement>('.sketch-c-del').forEach((el) => {
+      const idx = Number(el.dataset.index);
+      el.addEventListener('click', () => {
+        this.pushUndo();
+        this.constraints.splice(idx, 1);
+        this.referenceConstraints = this.referenceConstraints
+          .filter((i) => i !== idx)
+          .map((i) => (i > idx ? i - 1 : i));
+        void this.solveSilent();
+        this.render();
+        this.viewer.requestRender();
+        this.onChange?.();
+      });
+    });
+
+    this.panel.querySelector('#export-dxf')!.addEventListener('click', () => void this.exportDxf());
+    this.panel.querySelector('#export-svg')!.addEventListener('click', () => void this.exportSvg());
+    this.panel.querySelector('#export-json')!.addEventListener('click', () => void this.exportReportJson());
+    this.panel.querySelector('#export-csv')!.addEventListener('click', () => void this.exportReportCsv());
   }
+}
+
+function toggleInArray(arr: number[], id: number): void {
+  const idx = arr.indexOf(id);
+  if (idx >= 0) arr.splice(idx, 1);
+  else arr.push(id);
+}
+
+function isAngleInArc(ang: number, start: number, end: number, tolRad = 0.2): boolean {
+  const twoPi = Math.PI * 2;
+  const sweep = ((end - start) % twoPi + twoPi) % twoPi || twoPi;
+  const rel = ((ang - start) % twoPi + twoPi) % twoPi;
+  return rel <= sweep + tolRad || rel >= twoPi - tolRad;
+}
+
+function circumcircleArc(
+  x1: number,
+  y1: number,
+  x2: number,
+  y2: number,
+  x3: number,
+  y3: number,
+): { cx: number; cy: number; radius: number; startAngle: number; endAngle: number } | null {
+  const d = 2 * (x1 * (y2 - y3) + x2 * (y3 - y1) + x3 * (y1 - y2));
+  if (Math.abs(d) < 1e-5) return null;
+  const s1 = x1 * x1 + y1 * y1;
+  const s2 = x2 * x2 + y2 * y2;
+  const s3 = x3 * x3 + y3 * y3;
+  const cx = (s1 * (y2 - y3) + s2 * (y3 - y1) + s3 * (y1 - y2)) / d;
+  const cy = (s1 * (x3 - x2) + s2 * (x1 - x3) + s3 * (x2 - x1)) / d;
+  const radius = Math.hypot(x1 - cx, y1 - cy);
+  if (!Number.isFinite(radius) || radius < 1 || radius > 1e6) return null;
+
+  const twoPi = Math.PI * 2;
+  const a1 = Math.atan2(y1 - cy, x1 - cx);
+  const a2 = Math.atan2(y2 - cy, x2 - cx);
+  const a3 = Math.atan2(y3 - cy, x3 - cx);
+  const sweep12 = ((a2 - a1) % twoPi + twoPi) % twoPi;
+  const sweep13 = ((a3 - a1) % twoPi + twoPi) % twoPi;
+
+  if (sweep13 <= sweep12) {
+    return { cx, cy, radius, startAngle: a1, endAngle: a1 + sweep12 };
+  }
+  return { cx, cy, radius, startAngle: a2, endAngle: a2 + (twoPi - sweep12) };
+}
+
+function distToSegment(
+  px: number,
+  py: number,
+  ax: number,
+  ay: number,
+  bx: number,
+  by: number,
+): number {
+  const dx = bx - ax;
+  const dy = by - ay;
+  const len2 = dx * dx + dy * dy;
+  if (len2 < 1e-9) return Math.hypot(px - ax, py - ay);
+  const t = Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / len2));
+  return Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
+}
+
+function projectPointToSegment(
+  px: number,
+  py: number,
+  ax: number,
+  ay: number,
+  bx: number,
+  by: number,
+): { x: number; y: number } {
+  const dx = bx - ax;
+  const dy = by - ay;
+  const len2 = dx * dx + dy * dy;
+  if (len2 < 1e-9) return { x: ax, y: ay };
+  const t = Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / len2));
+  return { x: ax + t * dx, y: ay + t * dy };
+}
+
+function segmentIntersectsRect(
+  ax: number,
+  ay: number,
+  bx: number,
+  by: number,
+  minX: number,
+  minY: number,
+  maxX: number,
+  maxY: number,
+): boolean {
+  if (
+    (ax >= minX && ax <= maxX && ay >= minY && ay <= maxY) ||
+    (bx >= minX && bx <= maxX && by >= minY && by <= maxY)
+  ) {
+    return true;
+  }
+  return (
+    segmentIntersectionT(ax, ay, bx, by, minX, minY, maxX, minY) !== null ||
+    segmentIntersectionT(ax, ay, bx, by, maxX, minY, maxX, maxY) !== null ||
+    segmentIntersectionT(ax, ay, bx, by, maxX, maxY, minX, maxY) !== null ||
+    segmentIntersectionT(ax, ay, bx, by, minX, maxY, minX, minY) !== null
+  );
+}
+
+function segmentIntersectionT(
+  x1: number,
+  y1: number,
+  x2: number,
+  y2: number,
+  x3: number,
+  y3: number,
+  x4: number,
+  y4: number,
+): number | null {
+  const denom = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4);
+  if (Math.abs(denom) < 1e-9) return null;
+  const t = ((x1 - x3) * (y3 - y4) - (y1 - y3) * (x3 - x4)) / denom;
+  const u = -((x1 - x2) * (y1 - y3) - (y1 - y2) * (x1 - x3)) / denom;
+  if (t >= 0 && t <= 1 && u >= 0 && u <= 1) return t;
+  return null;
 }
 
 function escapeHtml(s: string): string {

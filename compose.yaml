@@ -7,8 +7,13 @@ services:
     ports:
       - "8080:8080"
     restart: unless-stopped
+    environment:
+      RASTERFIT_SUPERADMIN_USERNAME: "${RASTERFIT_SUPERADMIN_USERNAME:-superadmin}"
+      RASTERFIT_SUPERADMIN_PASSWORD: "${RASTERFIT_SUPERADMIN_PASSWORD:-}"
+    volumes:
+      - rasterfit_data:/data
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz')"]
       interval: 5s
       timeout: 3s
       retries: 3
@@ -16,9 +21,13 @@ services:
     read_only: true
     tmpfs:
       - /tmp
-      - /var/cache/nginx
       - /run
     cap_drop: [ALL]
     security_opt:
       - no-new-privileges:true
-    # No volumes, no backend: data stays in the browser.
+    # Native FastAPI + rf-cli backend serves the API and the static web build.
+    # Raster sessions are written to a tmpfs-backed temp dir (cleared on restart);
+    # users/sessions persist on the named `rasterfit_data` volume (/data).
+
+volumes:
+  rasterfit_data:

@@ -45,19 +45,19 @@ body {
   display: none !important;
 }
 
-/* --- Start screen card ------------------------------------------------ */
+/* --- Background Raster Reference dock card ----------------------------- */
 .start-card {
   position: absolute;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%);
-  width: min(360px, calc(100% - 32px));
-  padding: var(--space-32) var(--space-24);
+  bottom: 44px;
+  right: var(--space-16);
+  width: min(280px, calc(100% - 32px));
+  padding: var(--space-16);
   background: var(--color-surface-panel);
   border: var(--border-width) solid var(--color-divider);
   border-radius: var(--radius-overlay);
   box-shadow: var(--shadow-overlay);
   text-align: center;
+  z-index: var(--z-panel);
   animation: fade-in var(--overlay-duration-enter) ease;
 }
 
@@ -158,6 +158,11 @@ body {
   stroke-width: 1.5;
 }
 
+/* Account button sits to the left of the theme toggle (both are icon-btn). */
+#account-btn {
+  right: calc(var(--space-16) + var(--target-coarse) + var(--space-8));
+}
+
 /* --- Status bar -------------------------------------------------------- */
 .status-bar {
   position: absolute;
@@ -223,6 +228,12 @@ body.is-dragging .start-card {
   background: var(--color-control-active-surface);
 }
 
+.tool-btn[aria-pressed='true'] {
+  color: var(--color-accent-contrast);
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+}
+
 .toolbar-spacer {
   width: var(--space-4);
 }
@@ -238,8 +249,8 @@ body.is-dragging .start-card {
   position: absolute;
   top: 56px;
   left: var(--space-12);
-  width: 200px;
-  max-height: min(320px, calc(100% - 120px));
+  width: 220px;
+  max-height: calc(100dvh - 96px);
   overflow: auto;
   padding: var(--space-16);
   background: var(--color-surface-panel);
@@ -287,9 +298,35 @@ body.is-dragging .start-card {
   border-color: var(--color-accent);
 }
 
-/* --- Calibration panel ------------------------------------------------- */
+/* --- Calibration / Sketch / Mask panels -------------------------------- */
 .panel-wide {
-  width: 300px;
+  width: 344px;
+  padding: var(--space-12);
+}
+
+.sketch-toolbar-box {
+  padding: 6px 8px;
+  margin-bottom: 8px;
+  background: var(--color-surface-field);
+  border: var(--border-width) solid var(--color-divider);
+  border-radius: var(--radius-control);
+}
+
+.sketch-toolbar-box .cal-actions {
+  margin-bottom: 4px;
+}
+
+.sketch-toolbar-box .cal-actions:last-child {
+  margin-bottom: 0;
+}
+
+.sketch-toolbar-title {
+  margin-bottom: 5px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--color-text-secondary);
 }
 
 .panel-head {
@@ -477,4 +514,87 @@ body.is-dragging .start-card {
   .start-card {
     animation: none;
   }
+}
+
+/* --- Account / user management panel -------------------------------- */
+#account-panel {
+  width: 300px;
+}
+
+.panel-hint {
+  margin: 0 0 var(--space-8);
+  font-size: var(--font-size-small, 12px);
+  color: var(--color-text-secondary);
+}
+
+.panel-subhead {
+  margin: var(--space-12) 0 var(--space-4);
+  font-size: var(--font-size-small, 12px);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-text-secondary);
+}
+
+.account-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+  margin: var(--space-8) 0;
+}
+
+.account-form label {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  font-size: var(--font-size-small, 12px);
+}
+
+.account-form input,
+.account-form select {
+  width: 100%;
+  min-height: var(--target-fine, 32px);
+  padding: var(--space-4) var(--space-8);
+  font: inherit;
+  color: var(--color-text-primary);
+  background: var(--color-surface-field);
+  border: var(--border-width) solid var(--color-divider);
+  border-radius: var(--radius-control);
+}
+
+.account-users {
+  margin: var(--space-8) 0 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+}
+
+.account-user {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-8);
+  padding: var(--space-8);
+  background: var(--color-surface-field);
+  border: var(--border-width) solid var(--color-divider);
+  border-radius: var(--radius-control);
+}
+
+.account-username {
+  flex: 1 1 100%;
+  font-weight: var(--font-weight-medium, 600);
+}
+
+.account-active {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-4);
+  font-size: var(--font-size-small, 12px);
+}
+
+.account-msg {
+  margin: var(--space-8) 0 0;
+  font-size: var(--font-size-small, 12px);
+  color: var(--color-danger);
 }
