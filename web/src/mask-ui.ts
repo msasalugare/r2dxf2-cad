@@ -480,7 +480,7 @@ export class MaskController {
       }
       <div class="cal-actions">
         <label class="cal-label" for="mask-radius-input">${t(locale, 'mask.radius')}: ${this.radius}</label>
-        <input id="mask-radius-input" type="range" min="2" max="60" value="${this.radius}" style="flex:1" />
+        <input id="mask-radius-input" type="range" min="2" max="60" value="${this.radius}" class="flex-1" />
       </div>
       <div class="cal-actions">
         <button id="mask-from-sketch" class="btn" type="button">${t(locale, 'mask.fromSketch')}</button>

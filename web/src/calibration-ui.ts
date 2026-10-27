@@ -594,8 +594,8 @@ export class CalibrationController {
       </div>
       <div class="cal-actions">
         <label class="cal-label" for="cal-rot-input">${t(locale, 'calibrate.rotation')}</label>
-        <input id="cal-rot-input" class="cal-length" style="width:70px" type="number" step="0.1" value="${rotDeg.toFixed(2)}" aria-label="${t(locale, 'calibrate.rotation')}" />
-        <input id="cal-rot-slider" type="range" min="-45" max="45" step="0.05" value="${sliderDeg.toFixed(2)}" style="flex:1;min-width:90px" aria-label="${t(locale, 'calibrate.rotation')}" />
+        <input id="cal-rot-input" class="cal-length w-70" type="number" step="0.1" value="${rotDeg.toFixed(2)}" aria-label="${t(locale, 'calibrate.rotation')}" />
+        <input id="cal-rot-slider" type="range" min="-45" max="45" step="0.05" value="${sliderDeg.toFixed(2)}" class="flex-1 min-w-90" aria-label="${t(locale, 'calibrate.rotation')}" />
       </div>
       <div class="cal-actions">
         <button id="cal-rot-m90" class="btn" type="button" title="-90°">−90°</button>
@@ -615,7 +615,7 @@ export class CalibrationController {
       </div>
       <div class="cal-actions">
         <label class="cal-label" for="cal-opacity-slider">${t(locale, 'calibrate.bg.opacity')}</label>
-        <input id="cal-opacity-slider" type="range" min="0" max="1" step="0.05" value="${disp.opacity.toFixed(2)}" style="flex:1;min-width:80px" aria-label="${t(locale, 'calibrate.bg.opacity')}" />
+        <input id="cal-opacity-slider" type="range" min="0" max="1" step="0.05" value="${disp.opacity.toFixed(2)}" class="flex-1 min-w-80" aria-label="${t(locale, 'calibrate.bg.opacity')}" />
       </div>
       <ol class="cal-segments" id="cal-segments">${this.segments
         .map((seg, i) => this.segmentRow(seg, i))
@@ -743,7 +743,7 @@ export class CalibrationController {
     const locale = this.locale;
     const angleInput =
       seg.orientation.type === 'angle'
-        ? `<input class="cal-angle-deg cal-length" style="width:52px" type="number" step="0.1" data-index="${i}" value="${((seg.orientation.angle * 180) / Math.PI).toFixed(1)}" aria-label="${t(locale, 'calibrate.angle')}" />`
+        ? `<input class="cal-angle-deg cal-length w-52" type="number" step="0.1" data-index="${i}" value="${((seg.orientation.angle * 180) / Math.PI).toFixed(1)}" aria-label="${t(locale, 'calibrate.angle')}" />`
         : '';
     return `
       <li class="cal-segment">

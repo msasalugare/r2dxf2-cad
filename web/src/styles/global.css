@@ -128,6 +128,65 @@ body {
   color: var(--color-text-secondary);
 }
 
+/* --- Auth screen (signed-out experience) -------------------------------- */
+.auth-screen {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-24);
+  background: var(--color-surface-shell);
+  z-index: calc(var(--z-status) + 1);
+}
+
+.auth-card {
+  width: min(360px, 100%);
+  padding: var(--space-32);
+  background: var(--color-surface-panel);
+  border: var(--border-width) solid var(--color-divider);
+  border-radius: var(--radius-overlay);
+  box-shadow: var(--shadow-overlay);
+  text-align: center;
+}
+
+.auth-title {
+  margin: 0;
+  font-size: var(--font-size-title);
+  font-weight: var(--font-weight-semibold);
+  line-height: var(--line-height-quantity);
+}
+
+.auth-tagline {
+  margin: var(--space-8) 0 0;
+  color: var(--color-text-secondary);
+}
+
+.auth-hint {
+  margin: var(--space-16) 0 var(--space-8);
+  font-size: var(--font-size-secondary);
+  color: var(--color-text-secondary);
+}
+
+.auth-card .account-form {
+  text-align: left;
+}
+
+/* Workspace chrome is hidden while signed out; the auth screen is hidden once
+   signed in. */
+html[data-auth='signed-out'] .toolbar,
+html[data-auth='signed-out'] .start-card,
+html[data-auth='signed-out'] .panel,
+html[data-auth='signed-out'] .status-bar,
+html[data-auth='signed-out'] #account-btn,
+html[data-auth='signed-out'] .autosave-prompt {
+  display: none;
+}
+
+html[data-auth='signed-in'] .auth-screen {
+  display: none;
+}
+
 /* --- Theme toggle ------------------------------------------------------ */
 .icon-btn {
   position: absolute;
@@ -145,6 +204,7 @@ body {
   cursor: pointer;
   box-shadow: var(--shadow-floating);
   transition: var(--transition-interactive);
+  z-index: calc(var(--z-status) + 2);
 }
 
 .icon-btn:hover {
@@ -501,6 +561,10 @@ body.is-dragging .start-card {
   text-align: right;
 }
 
+#dof {
+  margin-right: var(--space-12);
+}
+
 @keyframes fade-in {
   from {
     opacity: 0;
@@ -597,4 +661,94 @@ body.is-dragging .start-card {
   margin: var(--space-8) 0 0;
   font-size: var(--font-size-small, 12px);
   color: var(--color-danger);
+}
+
+/* --- CSP-safe replacements for former inline `style=""` attributes ------- */
+/* (inline styles are blocked by `style-src 'self'`; these classes restore the
+   same visuals through the external stylesheet.) */
+.flex-1 {
+  flex: 1;
+}
+
+.min-w-80 {
+  min-width: 80px;
+}
+
+.min-w-90 {
+  min-width: 90px;
+}
+
+.w-38 {
+  width: 38px;
+}
+
+.w-52 {
+  width: 52px;
+}
+
+.w-54 {
+  width: 54px;
+}
+
+.w-70 {
+  width: 70px;
+}
+
+.mt-6 {
+  margin-top: 6px;
+}
+
+.mb-6 {
+  margin-bottom: 6px;
+}
+
+.mb-8 {
+  margin-bottom: 8px;
+}
+
+.cursor-pointer {
+  cursor: pointer;
+}
+
+/* Solver status banners (sketch panel). */
+.sketch-banner {
+  width: 100%;
+  margin-bottom: 6px;
+}
+
+.sketch-banner-conflict {
+  border-color: var(--color-danger);
+  color: var(--color-danger);
+}
+
+.sketch-banner-redundant {
+  border-color: var(--color-warning);
+  color: var(--color-warning);
+}
+
+.sketch-status {
+  padding: 4px 8px;
+  margin-bottom: 6px;
+  border-radius: 4px;
+  font-size: 12px;
+}
+
+.sketch-status-ok {
+  background: rgba(22, 163, 74, 0.12);
+  color: #16a34a;
+  font-weight: 600;
+}
+
+.sketch-status-hint {
+  background: rgba(36, 101, 199, 0.08);
+}
+
+/* Constraint list row states. */
+.segment-conflict {
+  color: var(--color-danger);
+  font-weight: 600;
+}
+
+.segment-redundant {
+  color: var(--color-warning);
 }

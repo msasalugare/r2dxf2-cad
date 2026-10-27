@@ -58,25 +58,3 @@ test('draws a multi-segment polyline chain and finishes on Escape', async ({ pag
   await page.locator('#sketch-solve').click();
   await expect(page.locator('#sketch-result')).toContainText('Solved');
 });
-
-test('boots directly into FreeCAD Sketcher workspace and solves constraints without raster', async ({
-  page,
-}) => {
-  await page.setViewportSize({ width: 1280, height: 720 });
-  await page.goto('/');
-  // Sketcher panel is immediately visible on boot before any raster is imported!
-  await expect(page.locator('#sketch-panel')).toBeVisible();
-
-  // Draw a rectangle directly on the CAD workspace using the Rect tool (R)
-  await page.locator('#sketch-tool-rect').click();
-  await page.mouse.click(450, 260);
-  await page.mouse.click(750, 460);
-
-  // Add a driving LineLength constraint of 120 mm on Line #1 and solve
-  await page.locator('#sketch-c-type').selectOption('LineLength');
-  await page.locator('#sketch-c-e1').fill('1');
-  await page.locator('#sketch-c-val').fill('120');
-  await page.locator('#sketch-c-add').click();
-
-  await expect(page.locator('#sketch-result')).toContainText('Solved');
-});

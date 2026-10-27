@@ -215,6 +215,13 @@ export class RasterViewer {
     this.onCameraChange?.();
   }
 
+  /** Swap the raster page in place (e.g. after server-side image adjustments),
+   *  preserving camera, transform, and origin. */
+  replacePage(page: RasterPage): void {
+    this.page = page;
+    this.scheduleRender();
+  }
+
   /** Zoom by `factor` around the canvas center. */
   zoomBy(factor: number): void {
     this.camera = zoomAt(this.camera, this.viewWidth() / 2, this.viewHeight() / 2, factor);

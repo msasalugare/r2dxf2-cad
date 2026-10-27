@@ -21,14 +21,17 @@ export class AccountController {
   private editingPwUserId: number | null = null;
 
   constructor(
+    private readonly authScreen: HTMLElement,
     private readonly panel: HTMLElement,
     private readonly button: HTMLElement,
     private readonly locale: Locale,
     private readonly onAuthChange: (user: AuthUser | null) => void,
   ) {
-    this.panel.addEventListener('submit', (e) => void this.handleSubmit(e));
-    this.panel.addEventListener('click', (e) => void this.handleClick(e));
-    this.panel.addEventListener('change', (e) => void this.handleChange(e));
+    for (const host of [this.authScreen, this.panel]) {
+      host.addEventListener('submit', (e) => void this.handleSubmit(e));
+      host.addEventListener('click', (e) => void this.handleClick(e));
+      host.addEventListener('change', (e) => void this.handleChange(e));
+    }
   }
 
   async init(): Promise<void> {
@@ -37,8 +40,10 @@ export class AccountController {
   }
 
   private setMessage(text: string): void {
-    const el = this.panel.querySelector<HTMLElement>('[data-account-msg]');
-    if (el) el.textContent = text;
+    for (const host of [this.authScreen, this.panel]) {
+      const el = host.querySelector<HTMLElement>('[data-account-msg]');
+      if (el) el.textContent = text;
+    }
   }
 
   private render(): void {
@@ -50,27 +55,32 @@ export class AccountController {
     this.button.setAttribute('aria-label', label);
     this.onAuthChange(this.user);
     if (!this.user) {
-      this.panel.innerHTML = this.loginMarkup();
+      this.authScreen.innerHTML = this.authScreenMarkup();
+      this.panel.innerHTML = '';
     } else {
+      this.authScreen.innerHTML = '';
       this.panel.innerHTML = this.accountMarkup();
       if (this.user.role === 'superadmin') void this.renderUsers();
     }
   }
 
-  private loginMarkup(): string {
+  private authScreenMarkup(): string {
     return `
-      <h2 class="panel-title">${t(this.locale, 'account.login')}</h2>
-      <p class="panel-hint">${t(this.locale, 'account.notAuthenticated')}</p>
-      <form data-action="login" class="account-form">
-        <label>${t(this.locale, 'account.username')}
-          <input name="username" autocomplete="username" required />
-        </label>
-        <label>${t(this.locale, 'account.password')}
-          <input name="password" type="password" autocomplete="current-password" required />
-        </label>
-        <button type="submit" class="btn btn-primary">${t(this.locale, 'account.login')}</button>
-      </form>
-      <p class="account-msg" data-account-msg></p>`;
+      <div class="auth-card">
+        <h1 class="auth-title">${t(this.locale, 'app.title')}</h1>
+        <p class="auth-tagline">${t(this.locale, 'app.tagline')}</p>
+        <p class="auth-hint">${t(this.locale, 'account.notAuthenticated')}</p>
+        <form data-action="login" class="account-form">
+          <label>${t(this.locale, 'account.username')}
+            <input name="username" autocomplete="username" required />
+          </label>
+          <label>${t(this.locale, 'account.password')}
+            <input name="password" type="password" autocomplete="current-password" required />
+          </label>
+          <button type="submit" class="btn btn-primary">${t(this.locale, 'account.login')}</button>
+        </form>
+        <p class="account-msg" data-account-msg></p>
+      </div>`;
   }
 
   private accountMarkup(): string {

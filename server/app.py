@@ -462,6 +462,90 @@ def api_solve(sketch: Dict[str, Any], user: sqlite3.Row = Depends(current_user))
     return Response(content=out, media_type="application/json")
 
 
+DEFAULT_ADJUSTMENTS: Dict[str, Any] = {
+    "contrast": 1.0,
+    "sharpness": 0.0,
+    "colour_balance": {"r": 1.0, "g": 1.0, "b": 1.0},
+}
+
+
+def _normalize_adjustments(adj: Dict[str, Any]) -> Dict[str, Any]:
+    """Clamp/coerce adjustment params and fill missing keys with no-op defaults."""
+    cb = adj.get("colour_balance") or {}
+    return {
+        "contrast": max(0.2, min(5.0, float(adj.get("contrast", 1.0)))),
+        "sharpness": max(0.0, min(6.0, float(adj.get("sharpness", 0.0)))),
+        "colour_balance": {
+            "r": max(0.2, min(5.0, float(cb.get("r", 1.0)))),
+            "g": max(0.2, min(5.0, float(cb.get("g", 1.0)))),
+            "b": max(0.2, min(5.0, float(cb.get("b", 1.0)))),
+        },
+    }
+
+
+def _apply_adjustments(rgb: np.ndarray, adj: Dict[str, Any]) -> np.ndarray:
+    """Apply sharpness/contrast/colour-balance to an RGB uint8 image.
+
+    Defaults are identity (no-op), so the existing import path is unchanged.
+    """
+    contrast = float(adj["contrast"])
+    sharpness = float(adj["sharpness"])
+    cb = adj["colour_balance"]
+
+    out = rgb.astype(np.float32)
+
+    # Per-channel colour balance (white-balance style gain).
+    if cb["r"] != 1.0 or cb["g"] != 1.0 or cb["b"] != 1.0:
+        out[:, :, 0] *= cb["r"]
+        out[:, :, 1] *= cb["g"]
+        out[:, :, 2] *= cb["b"]
+
+    # Contrast around mid-gray.
+    if contrast != 1.0:
+        out = (out - 128.0) * contrast + 128.0
+
+    # Unsharp-mask sharpening.
+    if sharpness != 0.0:
+        blurred = cv2.GaussianBlur(out, (0, 0), 1.2)
+        out = out + sharpness * (out - blurred)
+
+    return np.clip(out, 0.0, 255.0).astype(np.uint8)
+
+
+def _write_raster_artifacts(session_dir: Path, rgb: np.ndarray) -> List[Dict[str, Any]]:
+    """Write display PNG + gray buffer, re-detect ridges, return ridge points."""
+    cv2.imwrite(str(session_dir / "image.png"), cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR))
+    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+    (session_dir / "gray.bin").write_bytes(gray.tobytes())
+    height, width = rgb.shape[:2]
+    ridges_raw = run_rf_cli(
+        "detect-ridges",
+        {
+            "gray_path": str(session_dir / "gray.bin"),
+            "width": int(width),
+            "height": int(height),
+            "params": {"scales": [1.0, 1.5, 2.5], "background_radius": 24, "min_strength": 5.0},
+        },
+    )
+    (session_dir / "ridges.json").write_text(ridges_raw)
+    return json.loads(ridges_raw)
+
+
+def _session_response(session_dir: Path, meta: Dict[str, Any], ridges: List[Any]) -> Dict[str, Any]:
+    return {
+        "raster_id": session_dir.name,
+        "width": meta["width"],
+        "height": meta["height"],
+        "page_count": meta["page_count"],
+        "page": meta["page"],
+        "dpi": meta["dpi"],
+        "image_url": f"/api/raster/{session_dir.name}/image?v={meta.get('version', 0)}",
+        "ridge_count": len(ridges),
+        "ridges": ridges,
+        "adjustments": meta.get("adjustments", DEFAULT_ADJUSTMENTS),
+    }
+
+
 def _process_and_store_raster(
     session_dir: Path,
     rgb: np.ndarray,
@@ -470,14 +554,9 @@ def _process_and_store_raster(
     dpi: int,
 ) -> Dict[str, Any]:
     height, width = rgb.shape[:2]
-    bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-    png_path = session_dir / "image.png"
-    cv2.imwrite(str(png_path), bgr)
-
-    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
-    gray_path = session_dir / "gray.bin"
-    gray.tobytes()
-    gray_path.write_bytes(gray.tobytes())
+    # Retain the original decoded raster so adjustments can be re-applied later
+    # without a re-upload (PNG is lossless).
+    cv2.imwrite(str(session_dir / "original.png"), cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR))
 
     meta = {
         "width": int(width),
@@ -485,36 +564,13 @@ def _process_and_store_raster(
         "page_count": int(page_count),
         "page": int(page),
         "dpi": int(dpi),
+        "adjustments": DEFAULT_ADJUSTMENTS,
+        "version": 0,
     }
     (session_dir / "meta.json").write_text(json.dumps(meta))
 
-    # Run native Rust Steger sub-pixel ridge detector
-    ridges_raw = run_rf_cli(
-        "detect-ridges",
-        {
-            "gray_path": str(gray_path),
-            "width": int(width),
-            "height": int(height),
-            "params": {
-                "scales": [1.0, 1.5, 2.5],
-                "background_radius": 24,
-                "min_strength": 5.0,
-            },
-        },
-    )
-    (session_dir / "ridges.json").write_text(ridges_raw)
-    ridges = json.loads(ridges_raw)
-    return {
-        "raster_id": session_dir.name,
-        "width": int(width),
-        "height": int(height),
-        "page_count": int(page_count),
-        "page": int(page),
-        "dpi": int(dpi),
-        "image_url": f"/api/raster/{session_dir.name}/image",
-        "ridge_count": len(ridges),
-        "ridges": ridges,
-    }
+    ridges = _write_raster_artifacts(session_dir, rgb)
+    return _session_response(session_dir, meta, ridges)
 
 
 @app.post("/api/raster/upload")
@@ -589,6 +645,42 @@ def api_raster_image(raster_id: str, user: sqlite3.Row = Depends(current_user)) 
     if not png_path.exists():
         raise HTTPException(status_code=404, detail="Raster image not found")
     return FileResponse(str(png_path), media_type="image/png")
+
+
+class AdjustRequest(BaseModel):
+    contrast: float = 1.0
+    sharpness: float = 0.0
+    colour_balance: Optional[Dict[str, float]] = None
+
+
+@app.post("/api/raster/{raster_id}/adjust")
+def api_raster_adjust(raster_id: str, req: AdjustRequest, user: sqlite3.Row = Depends(current_user)) -> Dict[str, Any]:
+    session_dir = SESSIONS_DIR / raster_id
+    original_path = session_dir / "original.png"
+    meta_path = session_dir / "meta.json"
+    if not original_path.exists() or not meta_path.exists():
+        raise HTTPException(status_code=404, detail="Raster session not found")
+
+    meta = json.loads(meta_path.read_text())
+    adjustments = _normalize_adjustments({
+        "contrast": req.contrast,
+        "sharpness": req.sharpness,
+        "colour_balance": req.colour_balance or {},
+    })
+
+    bgr = cv2.imread(str(original_path), cv2.IMREAD_COLOR)
+    if bgr is None:
+        raise HTTPException(status_code=500, detail="Failed to read original raster")
+    rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+
+    adjusted = _apply_adjustments(rgb, adjustments)
+    ridges = _write_raster_artifacts(session_dir, adjusted)
+
+    meta["adjustments"] = adjustments
+    meta["version"] = int(meta.get("version", 0)) + 1
+    (session_dir / "meta.json").write_text(json.dumps(meta))
+
+    return _session_response(session_dir, meta, ridges)
 
 
 class SnapRequest(BaseModel):

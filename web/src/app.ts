@@ -3,6 +3,7 @@
 // No UI framework — plain DOM + Canvas.
 
 import { AccountController } from './account';
+import { AdjustController } from './adjust-ui';
 import { Autosave, type AutosaveMeta } from './autosave';
 import {
   checkNativeBackend,
@@ -12,6 +13,7 @@ import {
 } from './backend';
 import { CalibrationController } from './calibration-ui';
 import { MaskController } from './mask-ui';
+import { PanelManager } from './panel-manager';
 import { SketchController } from './sketch-ui';
 import { IdbStore, MemoryKv, openDatabase } from './idb';
 import { detectLocale, t, tf, type Locale } from './i18n';
@@ -27,15 +29,16 @@ import {
 import type { RasterPage } from './raster';
 import { createSampleBlob } from './sample';
 import { MAX_IMPORT_BYTES, sniffBlob } from './sniff';
-import { initTheme, toggleTheme } from './theme';
+import { toggleTheme } from './theme';
 import { RasterViewer } from './viewer';
+
+type ShellState = 'signed-out' | 'empty' | 'importing' | 'ready' | 'editing';
 
 export function initApp(): () => void {
   const app = document.querySelector<HTMLDivElement>('#app');
   if (!app) return () => {};
 
   const locale: Locale = detectLocale(navigator.language);
-  initTheme();
 
   app.innerHTML = markup(locale);
 
@@ -49,8 +52,10 @@ export function initApp(): () => void {
   const calibrationPanel = document.querySelector<HTMLElement>('#calibration-panel')!;
   const sketchPanel = document.querySelector<HTMLElement>('#sketch-panel')!;
   const maskPanel = document.querySelector<HTMLElement>('#mask-panel')!;
+  const adjustPanel = document.querySelector<HTMLElement>('#adjust-panel')!;
   const accountBtn = document.querySelector<HTMLElement>('#account-btn')!;
   const accountPanel = document.querySelector<HTMLElement>('#account-panel')!;
+  const authScreen = document.querySelector<HTMLElement>('#auth-screen')!;
   const fileInput = document.querySelector<HTMLInputElement>('#file-input')!;
   const projectInput = document.querySelector<HTMLInputElement>('#project-input')!;
   const status = document.querySelector<HTMLElement>('#status')!;
@@ -60,8 +65,10 @@ export function initApp(): () => void {
 
   const viewer = new RasterViewer(canvas);
   const importer = new Importer();
-  const account = new AccountController(accountPanel, accountBtn, locale, (user) => {
+  const account = new AccountController(authScreen, accountPanel, accountBtn, locale, (user) => {
     document.documentElement.dataset.user = user ? user.username : '';
+    document.documentElement.dataset.auth = user ? 'signed-in' : 'signed-out';
+    setState(user ? 'empty' : 'signed-out');
   });
 
   let kv: IdbStore | MemoryKv;
@@ -75,6 +82,35 @@ export function initApp(): () => void {
   const setStatus = (msg: string, isError = false): void => {
     status.textContent = msg;
     status.classList.toggle('is-error', isError);
+  };
+
+  let state: ShellState = 'signed-out';
+
+  // Single place that maps the shell state to visible chrome + default status.
+  const setState = (next: ShellState): void => {
+    if (next === state) return;
+    state = next;
+    document.documentElement.dataset.state = next;
+    const hasDoc = next === 'ready' || next === 'editing';
+    const showCard = next === 'empty' || next === 'importing';
+    startCard.hidden = !showCard;
+    toolbar.hidden = !hasDoc;
+    switch (next) {
+      case 'signed-out':
+        setStatus('');
+        break;
+      case 'empty':
+        setStatus(t(locale, 'start.drop'));
+        break;
+      case 'importing':
+        setStatus(t(locale, 'status.importing'));
+        break;
+      case 'ready':
+        setStatus(t(locale, 'status.ready'));
+        break;
+      case 'editing':
+        break;
+    }
   };
 
   const captureCurrentPageState = (): PageWorkspaceState => {
@@ -155,6 +191,70 @@ export function initApp(): () => void {
     syncWorkspaceAndAutosave,
   );
 
+  const adjust = new AdjustController(viewer, adjustPanel, locale, setStatus, async (session) => {
+    if (!doc || !activePage) return;
+    setStatus(t(locale, 'status.importing'));
+    try {
+      const page = await importer.buildFromServer(session);
+      activePage = page;
+      viewer.replacePage(page);
+      preloadPageGray(page);
+      refreshZoom();
+      setStatus(tf(locale, 'status.page', { n: pageIndex + 1, total: doc.pageCount }));
+    } catch {
+      setStatus(errorMessage('failed'), true);
+    }
+  });
+
+  // Centralized panel open/close state (at most one panel open at a time).
+  const panels = new PanelManager();
+  panels.register('calibration', {
+    isOpen: () => calibration.isActive(),
+    open: () => calibration.activate(),
+    close: () => calibration.deactivate(),
+  });
+  panels.register('sketch', {
+    isOpen: () => sketch.isActive(),
+    open: () => sketch.activate(),
+    close: () => sketch.deactivate(),
+  });
+  panels.register('mask', {
+    isOpen: () => mask.isActive(),
+    open: () => mask.activate(),
+    close: () => mask.deactivate(),
+  });
+  panels.register('adjust', {
+    isOpen: () => adjust.isActive(),
+    open: () => adjust.activate(),
+    close: () => adjust.deactivate(),
+  });
+  panels.register('pages', {
+    isOpen: () => !pagesPanel.hidden,
+    open: () => {
+      pagesPanel.hidden = false;
+    },
+    close: () => {
+      pagesPanel.hidden = true;
+    },
+  });
+  panels.register('account', {
+    isOpen: () => !accountPanel.hidden,
+    open: () => {
+      accountPanel.hidden = false;
+    },
+    close: () => {
+      accountPanel.hidden = true;
+    },
+  });
+
+  // A tool panel opening means editing; closing the last panel returns to the
+  // ready (document loaded) or empty state.
+  panels.setOnChange((openId) => {
+    if (state === 'signed-out' || state === 'importing') return;
+    const editing = openId === 'calibration' || openId === 'sketch' || openId === 'mask';
+    setState(editing ? 'editing' : doc ? 'ready' : 'empty');
+  });
+
   const refreshZoom = (): void => {
     zoom.textContent = tf(locale, 'status.zoom', {
       z: Math.round(viewer.getCamera().zoom * 100),
@@ -165,9 +265,11 @@ export function initApp(): () => void {
     const calBtn = document.querySelector<HTMLButtonElement>('#calibrate-btn');
     const skBtn = document.querySelector<HTMLButtonElement>('#sketch-btn');
     const mkBtn = document.querySelector<HTMLButtonElement>('#mask-btn');
+    const adjBtn = document.querySelector<HTMLButtonElement>('#adjust-btn');
     if (calBtn) calBtn.setAttribute('aria-pressed', String(calibration.isActive()));
     if (skBtn) skBtn.setAttribute('aria-pressed', String(sketch.isActive()));
     if (mkBtn) mkBtn.setAttribute('aria-pressed', String(mask.isActive()));
+    if (adjBtn) adjBtn.setAttribute('aria-pressed', String(adjust.isActive()));
     canvas.style.cursor = sketch.isActive()
       ? sketch.getCursor()
       : calibration.isActive() || mask.isActive()
@@ -287,9 +389,9 @@ export function initApp(): () => void {
     viewer.setPage(page);
     applyPageState(pageWorkspaces[index]);
     preloadPageGray(page);
+    adjust.refresh();
 
-    startCard.hidden = true;
-    toolbar.hidden = false;
+    setState('ready');
     pageNav.hidden = nextDoc.pageCount <= 1;
     calibration.deactivate();
     sketch.deactivate();
@@ -334,6 +436,7 @@ export function initApp(): () => void {
       viewer.setPage(page);
       applyPageState(pageWorkspaces[index]);
       preloadPageGray(page);
+      adjust.refresh();
       renderPagesList(doc.pageCount, index);
       setStatus(tf(locale, 'status.page', { n: index + 1, total: doc.pageCount }));
       if (originalBlob) {
@@ -360,7 +463,7 @@ export function initApp(): () => void {
   };
 
   const importFromFile = async (file: File): Promise<void> => {
-    setStatus(t(locale, 'status.importing'));
+    setState('importing');
     if (file.size > MAX_IMPORT_BYTES) {
       setStatus(errorMessage('too-large'), true);
       return;
@@ -391,7 +494,7 @@ export function initApp(): () => void {
   };
 
   const importSample = async (): Promise<void> => {
-    setStatus(t(locale, 'status.importing'));
+    setState('importing');
     try {
       const blob = await createSampleBlob();
       const session = await uploadRasterToBackend(blob, 'sample.png', 200, 1);
@@ -412,7 +515,7 @@ export function initApp(): () => void {
     autosavePrompt.hidden = true;
     if (!record) return;
     const file = new File([record.blob], record.meta.fileName, { type: record.blob.type });
-    setStatus(t(locale, 'status.importing'));
+    setState('importing');
     const kind = await sniffBlob(file);
     const session = await uploadRasterToBackend(file, record.meta.fileName, 200, 1);
     if (!session) {
@@ -446,45 +549,27 @@ export function initApp(): () => void {
       setStatus(t(locale, 'calibrate.result.none'), true);
       return;
     }
-    if (calibration.isActive()) calibration.deactivate();
-    else {
-      sketch.deactivate();
-      mask.deactivate();
-      accountPanel.hidden = true;
-      pagesPanel.hidden = true;
-      calibration.activate();
-    }
+    panels.toggle('calibration');
   });
   document.querySelector('#sketch-btn')!.addEventListener('click', () => {
-    if (sketch.isActive()) sketch.deactivate();
-    else {
-      calibration.deactivate();
-      mask.deactivate();
-      accountPanel.hidden = true;
-      pagesPanel.hidden = true;
-      sketch.activate();
-    }
+    panels.toggle('sketch');
   });
   document.querySelector('#mask-btn')!.addEventListener('click', () => {
     if (!activePage) {
       setStatus(t(locale, 'mask.hint'), true);
       return;
     }
-    if (mask.isActive()) mask.deactivate();
-    else {
-      calibration.deactivate();
-      sketch.deactivate();
-      accountPanel.hidden = true;
-      pagesPanel.hidden = true;
-      mask.activate();
+    panels.toggle('mask');
+  });
+  document.querySelector('#adjust-btn')!.addEventListener('click', () => {
+    if (!activePage) {
+      setStatus(t(locale, 'adjust.needsRaster'), true);
+      return;
     }
+    panels.toggle('adjust');
   });
   document.querySelector('#origin-tool-btn')!.addEventListener('click', () => {
-    calibration.deactivate();
-    mask.deactivate();
-    accountPanel.hidden = true;
-    pagesPanel.hidden = true;
-    if (!sketch.isActive()) sketch.activate();
+    panels.open('sketch');
     sketch.setTool('origin');
   });
   document.querySelector('#origin-reset-btn')!.addEventListener('click', () => {
@@ -497,13 +582,7 @@ export function initApp(): () => void {
   document.querySelector('#prev-btn')!.addEventListener('click', () => void showPage(pageIndex - 1));
   document.querySelector('#next-btn')!.addEventListener('click', () => void showPage(pageIndex + 1));
   document.querySelector('#pages-toggle')!.addEventListener('click', () => {
-    if (pagesPanel.hidden) {
-      accountPanel.hidden = true;
-      calibration.deactivate();
-      sketch.deactivate();
-      mask.deactivate();
-    }
-    pagesPanel.hidden = !pagesPanel.hidden;
+    panels.toggle('pages');
   });
   document.querySelector('#continue-btn')!.addEventListener('click', () => void continueAutosave());
   document.querySelector('#discard-btn')!.addEventListener('click', () => {
@@ -513,13 +592,7 @@ export function initApp(): () => void {
 
   document.querySelector('#theme-btn')!.addEventListener('click', () => toggleTheme());
   accountBtn.addEventListener('click', () => {
-    if (accountPanel.hidden) {
-      calibration.deactivate();
-      sketch.deactivate();
-      mask.deactivate();
-      pagesPanel.hidden = true;
-    }
-    accountPanel.hidden = !accountPanel.hidden;
+    panels.toggle('account');
   });
 
   fileInput.addEventListener('change', () => {
@@ -566,7 +639,7 @@ export function initApp(): () => void {
     try {
       const { data, raster } = unzipProject(await blobToBytes(file));
       const rasterFile = new File([raster as BlobPart], data.fileName);
-      setStatus(t(locale, 'status.importing'));
+      setState('importing');
       const kind = await sniffBlob(rasterFile);
       const session = await uploadRasterToBackend(rasterFile, data.fileName, 200, 1);
       if (!session) {
@@ -635,9 +708,8 @@ export function initApp(): () => void {
   };
   window.addEventListener('keydown', keydown);
 
-  // --- Boot: FreeCAD Sketcher-first workspace + autosave check ------------
-  toolbar.hidden = false;
-  sketch.activate();
+  // --- Boot: empty workspace + autosave check ---------------------------
+  setState('empty');
   refreshZoom();
   void checkNativeBackend();
   void account.init();
@@ -696,6 +768,7 @@ function markup(locale: Locale): string {
       <button id="calibrate-btn" class="tool-btn" type="button" title="${t(locale, 'toolbar.calibrate')} (C)">${t(locale, 'toolbar.calibrate')}</button>
       <button id="sketch-btn" class="tool-btn" type="button" title="${t(locale, 'toolbar.sketch')} (S)">${t(locale, 'toolbar.sketch')}</button>
       <button id="mask-btn" class="tool-btn" type="button" title="${t(locale, 'toolbar.mask')} (M)">${t(locale, 'toolbar.mask')}</button>
+      <button id="adjust-btn" class="tool-btn" type="button" title="${t(locale, 'toolbar.adjust')}">${t(locale, 'toolbar.adjust')}</button>
       <span class="toolbar-spacer"></span>
       <button id="origin-tool-btn" class="tool-btn" type="button" title="Move (0,0) Coordinate System Origin">🎯 (0,0)</button>
       <button id="origin-reset-btn" class="tool-btn" type="button" title="Reset (0,0) to bottom-left corner of raster">↺ (0,0)</button>
@@ -737,6 +810,8 @@ function markup(locale: Locale): string {
     <input id="project-input" type="file" hidden accept=".rasterfit.zip,application/zip" />
   </div>
 
+  <section class="auth-screen" id="auth-screen" aria-label="${t(locale, 'account.login')}"></section>
+
   <main class="start-card" role="main" aria-labelledby="title">
     <h1 id="title" class="title">${t(locale, 'app.title')}</h1>
     <p class="tagline">${t(locale, 'app.tagline')}</p>
@@ -760,6 +835,8 @@ function markup(locale: Locale): string {
 
   <aside class="panel panel-wide" id="mask-panel" aria-label="${t(locale, 'mask.title')}" hidden></aside>
 
+  <aside class="panel panel-wide" id="adjust-panel" aria-label="${t(locale, 'adjust.title')}" hidden></aside>
+
   <div class="autosave-prompt" id="autosave-prompt" role="alertdialog" aria-labelledby="autosave-text" hidden>
     <p id="autosave-text">${t(locale, 'autosave.prompt')}</p>
     <div class="autosave-actions">
@@ -771,7 +848,7 @@ function markup(locale: Locale): string {
   <footer class="status-bar" aria-live="polite" aria-atomic="true">
     <span id="status" class="status-text">${t(locale, 'status.ready')}</span>
     <span class="status-spacer"></span>
-    <span id="dof" class="status-text" style="margin-right: 12px;"></span>
+    <span id="dof" class="status-text"></span>
     <span id="coords" class="status-text"></span>
     <span id="zoom" class="status-text status-zoom"></span>
   </footer>

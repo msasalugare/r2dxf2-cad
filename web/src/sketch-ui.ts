@@ -3445,12 +3445,12 @@ export class SketchController {
 
     const solverBannerHtml =
       conflicting.length > 0
-        ? `<button id="sketch-remove-conflict" class="btn" style="width:100%;border-color:#dc2626;color:#dc2626;margin-bottom:6px" type="button">⚠ ${tf(locale, 'sketch.conflictWarn', { list: conflicting.map((i) => `#${i + 1}`).join(', ') })}</button>`
+        ? `<button id="sketch-remove-conflict" class="btn sketch-banner sketch-banner-conflict" type="button">⚠ ${tf(locale, 'sketch.conflictWarn', { list: conflicting.map((i) => `#${i + 1}`).join(', ') })}</button>`
         : redundant.length > 0
-          ? `<button id="sketch-remove-redundant" class="btn" style="width:100%;border-color:#b54708;color:#b54708;margin-bottom:6px" type="button">⚠ ${tf(locale, 'sketch.redundantWarn', { list: redundant.map((i) => `#${i + 1}`).join(', ') })}</button>`
+          ? `<button id="sketch-remove-redundant" class="btn sketch-banner sketch-banner-redundant" type="button">⚠ ${tf(locale, 'sketch.redundantWarn', { list: redundant.map((i) => `#${i + 1}`).join(', ') })}</button>`
           : dof === 0 && this.points.length > 0
-            ? `<div style="padding:4px 8px;margin-bottom:6px;border-radius:4px;background:rgba(22,163,74,0.12);color:#16a34a;font-size:12px;font-weight:600">✓ ${t(locale, 'sketch.fullyConstrained')}</div>`
-            : `<div style="padding:4px 8px;margin-bottom:6px;border-radius:4px;background:rgba(36,101,199,0.08);font-size:12px">${tf(locale, 'sketch.underConstrained', { dof })}</div>`;
+            ? `<div class="sketch-status sketch-status-ok">✓ ${t(locale, 'sketch.fullyConstrained')}</div>`
+            : `<div class="sketch-status sketch-status-hint">${tf(locale, 'sketch.underConstrained', { dof })}</div>`;
 
     const selectionSummary = [
       ...this.selectedPoints.map((id) => `Pt#${id}`),
@@ -3467,7 +3467,7 @@ export class SketchController {
         const isConflict = conflicting.includes(idx);
         const isRedundant = redundant.includes(idx);
         return `
-          <li class="cal-segment" style="${isConflict ? 'color:#dc2626;font-weight:600' : isRedundant ? 'color:#b54708' : ''}">
+          <li class="cal-segment${isConflict ? ' segment-conflict' : isRedundant ? ' segment-redundant' : ''}">
             <input type="checkbox" class="sketch-c-ref" data-index="${idx}" ${!isRef ? 'checked' : ''} title="Driving" />
             <span class="cal-label">#${idx + 1} ${escapeHtml(key)} ${escapeHtml(val)}</span>
             <button class="sketch-c-del tool-btn cal-delete" type="button" data-index="${idx}" aria-label="Delete">×</button>
@@ -3598,9 +3598,9 @@ export class SketchController {
             <option value="AngleLine">AngleLine (line, deg)</option>
             <option value="FixedPoint">FixedPoint (pt)</option>
           </select>
-          <input id="sketch-c-e1" class="cal-length" style="width:38px" type="number" value="1" aria-label="ID 1" />
-          <input id="sketch-c-e2" class="cal-length" style="width:38px" type="number" value="2" aria-label="ID 2" />
-          <input id="sketch-c-val" class="cal-length" style="width:54px" type="number" value="50" aria-label="Value" />
+          <input id="sketch-c-e1" class="cal-length w-38" type="number" value="1" aria-label="ID 1" />
+          <input id="sketch-c-e2" class="cal-length w-38" type="number" value="2" aria-label="ID 2" />
+          <input id="sketch-c-val" class="cal-length w-54" type="number" value="50" aria-label="Value" />
           <button id="sketch-c-add" class="btn" type="button">+</button>
         </div>
       </div>
@@ -3622,9 +3622,9 @@ export class SketchController {
         </div>
       </div>
 
-      <details style="margin-bottom:8px">
-        <summary class="cal-subhead" style="cursor:pointer">${t(locale, 'sketch.fitDialog')}</summary>
-        <div class="cal-actions" style="margin-top:6px">
+      <details class="mb-8">
+        <summary class="cal-subhead cursor-pointer">${t(locale, 'sketch.fitDialog')}</summary>
+        <div class="cal-actions mt-6">
           <label class="cal-label"><input id="fit-opt-geom" type="checkbox" ${this.fitOpts.fitGeometry ? 'checked' : ''} /> ${t(locale, 'sketch.fitGeometry')}</label>
           <label class="cal-label"><input id="fit-opt-rot" type="checkbox" ${this.fitOpts.fitRotation ? 'checked' : ''} /> ${t(locale, 'sketch.fitRotation')}</label>
           <label class="cal-label"><input id="fit-opt-trans" type="checkbox" ${this.fitOpts.fitTranslation ? 'checked' : ''} /> ${t(locale, 'sketch.fitTranslation')}</label>
@@ -3634,7 +3634,7 @@ export class SketchController {
       </details>
 
       ${constraintsHtml ? `<ol class="cal-segments">${constraintsHtml}</ol>` : ''}
-      ${elementsHtml ? `<details style="margin-bottom:8px"><summary class="cal-subhead" style="cursor:pointer">${t(locale, 'sketch.elements')} (${this.lines.length + this.circles.length + this.arcs.length})</summary><ol class="cal-segments">${elementsHtml}</ol></details>` : ''}
+      ${elementsHtml ? `<details class="mb-8"><summary class="cal-subhead cursor-pointer">${t(locale, 'sketch.elements')} (${this.lines.length + this.circles.length + this.arcs.length})</summary><ol class="cal-segments">${elementsHtml}</ol></details>` : ''}
 
       <p class="cal-empty" id="sketch-result">${escapeHtml(this.resultText)}</p>
     `;

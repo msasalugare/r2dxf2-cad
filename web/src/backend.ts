@@ -50,7 +50,20 @@ export interface NativeRasterSession {
   image_url: string;
   ridge_count: number;
   ridges: { x: number; y: number; direction: number; strength: number; scale: number }[];
+  adjustments: RasterAdjustments;
 }
+
+export interface RasterAdjustments {
+  contrast: number;
+  sharpness: number;
+  colour_balance: { r: number; g: number; b: number };
+}
+
+export const DEFAULT_ADJUSTMENTS: RasterAdjustments = {
+  contrast: 1.0,
+  sharpness: 0.0,
+  colour_balance: { r: 1.0, g: 1.0, b: 1.0 },
+};
 
 let nativeBackendAvailable: boolean | null = null;
 let activeRasterSession: NativeRasterSession | null = null;
@@ -167,6 +180,27 @@ export async function renderBackendPdfPage(
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ page, dpi }),
+    });
+    if (!res.ok) return null;
+    const session = (await res.json()) as NativeRasterSession;
+    activeRasterSession = session;
+    return session;
+  } catch {
+    return null;
+  }
+}
+
+/** Re-process a raster with server-side image adjustments (re-detects ridges). */
+export async function adjustRaster(
+  rasterId: string,
+  adjustments: RasterAdjustments,
+): Promise<NativeRasterSession | null> {
+  if (!(await checkNativeBackend())) return null;
+  try {
+    const res = await fetch(`/api/raster/${rasterId}/adjust`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(adjustments),
     });
     if (!res.ok) return null;
     const session = (await res.json()) as NativeRasterSession;
