@@ -5,6 +5,7 @@ export type Locale = 'sr' | 'en';
 const sr = {
   'app.title': 'RasterFit',
   'app.tagline': 'Precizno fitovanje skice na kalibrisan raster crtež',
+  'workspace.label': 'Radni prostor',
   'start.open': 'Otvori PDF / sliku',
   'start.sample': 'Probaj primer',
   'start.privacy': 'Sve radi lokalno u vašem pregledaču — ništa se ne otprema.',
@@ -174,6 +175,7 @@ const sr = {
 const en: Record<keyof typeof sr, string> = {
   'app.title': 'RasterFit',
   'app.tagline': 'Precisely fit a sketch to a calibrated raster drawing',
+  'workspace.label': 'Workspace',
   'start.open': 'Open PDF / image',
   'start.sample': 'Try a sample',
   'start.privacy': 'Everything runs locally in your browser — nothing is uploaded.',

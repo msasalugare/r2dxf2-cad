@@ -57,6 +57,8 @@ export class AccountController {
     if (!this.user) {
       this.authScreen.innerHTML = this.authScreenMarkup();
       this.panel.innerHTML = '';
+      // Move focus into the sign-in form for immediate keyboard entry.
+      this.authScreen.querySelector<HTMLInputElement>('input[name="username"]')?.focus();
     } else {
       this.authScreen.innerHTML = '';
       this.panel.innerHTML = this.accountMarkup();

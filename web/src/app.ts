@@ -794,7 +794,7 @@ function markup(locale: Locale): string {
   </header>
 
   <div class="workspace">
-    <canvas id="viewer" aria-label="RasterFit viewer"></canvas>
+    <canvas id="viewer" role="region" aria-label="${t(locale, 'workspace.label')}"></canvas>
 
     <aside class="panel" id="pages-panel" aria-label="${t(locale, 'pages.title')}" hidden>
       <h2 class="panel-title">${t(locale, 'pages.title')}</h2>
