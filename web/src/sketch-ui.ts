@@ -3161,10 +3161,11 @@ export class SketchController {
 
       const maskStrokes = this.getMaskStrokes();
       const payload: Record<string, unknown> = {
-        sketch: this.buildSketch(),
+        sketch: this.buildSolveSketch(),
         // Server-side ridges are in the same pixel frame as the displayed
         // raster (the server is the single source of truth), so they match
-        // the sketch coordinates directly.
+        // the sketch coordinates directly. The sketch carries the
+        // coordinate-system frame so H/V constraints reference the fixed axes.
         centerlines: session.ridges,
         initial: [0, 0, 0],
         params: fitterParams,

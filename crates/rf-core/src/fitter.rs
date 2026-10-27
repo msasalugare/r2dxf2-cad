@@ -1324,4 +1324,45 @@ mod tests {
         let diff = (res_a.params[0] - res_b.params[0]).abs();
         assert!(diff < 0.05, "mask boundary shift changed x by {diff} px");
     }
+
+    #[test]
+    fn fit_constraint_jacobian_uses_coordinate_frame() {
+        // The fitter shares `residual_vec` with the solver, so H/V constraints
+        // must reference the coordinate-system frame (screen axes), not the raw
+        // raster axes, when `frame` is present.
+        let theta = 30f64.to_radians();
+        let (s, c) = (theta.sin(), theta.cos());
+
+        // Raster direction `(cos θ, -sin θ)` is horizontal in the rotated frame.
+        let frame_h = Sketch {
+            points: vec![p(1, 0.0, 0.0), p(2, c, -s)],
+            lines: vec![line(1, 1, 2)],
+            circles: vec![],
+            arcs: vec![],
+            constraints: vec![Constraint::Horizontal(LineId::new(1))],
+            reference_constraints: vec![],
+            frame: Some([c, s, -s, c]),
+        };
+        let q = frame_h.to_params();
+        let (res, _) = constraint_jacobian(&frame_h, &q, frame_h.parameter_count() + 4);
+        assert_eq!(res.len(), 1);
+        assert!(res[0].abs() < 1e-9, "frame-horizontal residual {}", res[0]);
+
+        // Raster direction `(1, 0)` is NOT horizontal in the rotated frame.
+        let raster_h = Sketch {
+            points: vec![p(1, 0.0, 0.0), p(2, 1.0, 0.0)],
+            lines: vec![line(1, 1, 2)],
+            circles: vec![],
+            arcs: vec![],
+            constraints: vec![Constraint::Horizontal(LineId::new(1))],
+            reference_constraints: vec![],
+            frame: Some([c, s, -s, c]),
+        };
+        let q2 = raster_h.to_params();
+        let (res2, _) = constraint_jacobian(&raster_h, &q2, raster_h.parameter_count() + 4);
+        assert!(
+            res2[0].abs() > 0.1,
+            "raster-horizontal should not be frame-horizontal"
+        );
+    }
 }
