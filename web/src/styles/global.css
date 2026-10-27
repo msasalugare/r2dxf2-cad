@@ -22,6 +22,8 @@ body {
 
 #app {
   position: relative;
+  display: flex;
+  flex-direction: column;
   height: 100dvh;
 }
 
@@ -32,6 +34,25 @@ body {
   height: 100%;
   display: block;
   background: var(--color-surface-viewer);
+}
+
+/* --- Top app bar ------------------------------------------------------- */
+.app-bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  height: var(--appbar-height);
+  padding: 0 var(--space-12);
+  background: var(--color-surface-shell);
+  border-bottom: var(--border-width) solid var(--color-divider);
+  z-index: var(--z-panel);
+}
+
+/* --- Workspace (viewer + docks + overlays) ----------------------------- */
+.workspace {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
 }
 
 /* Visible, consistent focus. */
@@ -48,7 +69,7 @@ body {
 /* --- Background Raster Reference dock card ----------------------------- */
 .start-card {
   position: absolute;
-  bottom: 44px;
+  bottom: var(--space-16);
   right: var(--space-16);
   width: min(280px, calc(100% - 32px));
   padding: var(--space-16);
@@ -174,7 +195,7 @@ body {
 
 /* Workspace chrome is hidden while signed out; the auth screen is hidden once
    signed in. */
-html[data-auth='signed-out'] .toolbar,
+html[data-auth='signed-out'] .app-bar,
 html[data-auth='signed-out'] .start-card,
 html[data-auth='signed-out'] .panel,
 html[data-auth='signed-out'] .status-bar,
@@ -190,8 +211,8 @@ html[data-auth='signed-in'] .auth-screen {
 /* --- Theme toggle ------------------------------------------------------ */
 .icon-btn {
   position: absolute;
-  top: var(--space-16);
-  right: var(--space-16);
+  top: 0;
+  right: var(--space-4);
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -220,15 +241,12 @@ html[data-auth='signed-in'] .auth-screen {
 
 /* Account button sits to the left of the theme toggle (both are icon-btn). */
 #account-btn {
-  right: calc(var(--space-16) + var(--target-coarse) + var(--space-8));
+  right: calc(var(--space-4) * 2 + var(--target-coarse));
 }
 
 /* --- Status bar -------------------------------------------------------- */
 .status-bar {
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 0;
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
   height: 28px;
@@ -249,18 +267,18 @@ body.is-dragging .start-card {
 
 /* --- Viewer toolbar ---------------------------------------------------- */
 .toolbar {
-  position: absolute;
-  top: var(--space-12);
-  left: var(--space-12);
   display: flex;
   align-items: center;
   gap: var(--space-4);
-  padding: var(--space-4);
-  background: var(--color-surface-panel);
-  border: var(--border-width) solid var(--color-divider);
-  border-radius: var(--radius-control);
-  box-shadow: var(--shadow-floating);
-  z-index: var(--z-panel);
+  min-width: 0;
+  overflow: hidden;
+}
+
+.toolbar-group {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  flex: 0 0 auto;
 }
 
 .tool-btn {
@@ -294,8 +312,12 @@ body.is-dragging .start-card {
   border-color: var(--color-accent);
 }
 
-.toolbar-spacer {
-  width: var(--space-4);
+.toolbar-divider {
+  width: 1px;
+  height: 20px;
+  margin: 0 var(--space-8);
+  background: var(--color-divider);
+  flex: 0 0 auto;
 }
 
 .page-nav {
@@ -307,15 +329,14 @@ body.is-dragging .start-card {
 /* --- Pages panel ------------------------------------------------------- */
 .panel {
   position: absolute;
-  top: 56px;
-  left: var(--space-12);
-  width: 220px;
-  max-height: calc(100dvh - 96px);
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 240px;
   overflow: auto;
-  padding: var(--space-16);
+  padding: var(--space-12);
   background: var(--color-surface-panel);
-  border: var(--border-width) solid var(--color-divider);
-  border-radius: var(--radius-overlay);
+  border-right: var(--border-width) solid var(--color-divider);
   box-shadow: var(--shadow-overlay);
   z-index: var(--z-panel);
 }
@@ -360,8 +381,7 @@ body.is-dragging .start-card {
 
 /* --- Calibration / Sketch / Mask panels -------------------------------- */
 .panel-wide {
-  width: 344px;
-  padding: var(--space-12);
+  width: 360px;
 }
 
 .sketch-toolbar-box {
@@ -394,7 +414,10 @@ body.is-dragging .start-card {
   align-items: center;
   justify-content: space-between;
   gap: var(--space-8);
-  margin-bottom: var(--space-8);
+  margin: calc(-1 * var(--space-12)) calc(-1 * var(--space-12)) var(--space-12);
+  padding: var(--space-8) var(--space-12);
+  background: var(--color-surface-field);
+  border-bottom: var(--border-width) solid var(--color-divider);
 }
 
 .panel-head .panel-title {
@@ -518,7 +541,7 @@ body.is-dragging .start-card {
 /* --- Autosave prompt --------------------------------------------------- */
 .autosave-prompt {
   position: absolute;
-  bottom: 48px;
+  bottom: var(--space-16);
   left: 50%;
   transform: translateX(-50%);
   display: flex;
@@ -582,7 +605,11 @@ body.is-dragging .start-card {
 
 /* --- Account / user management panel -------------------------------- */
 #account-panel {
+  left: auto;
+  right: 0;
   width: 300px;
+  border-right: none;
+  border-left: var(--border-width) solid var(--color-divider);
 }
 
 .panel-hint {

@@ -759,91 +759,100 @@ function autosaveMeta(
 
 function markup(locale: Locale): string {
   return `
-  <div role="region" aria-label="Workspace">
-    <canvas id="viewer" aria-label="RasterFit viewer"></canvas>
-
+  <header class="app-bar">
     <div class="toolbar" role="toolbar" aria-label="Viewer" hidden>
-      <button id="toolbar-open" class="tool-btn" type="button" title="${t(locale, 'start.open')}">${t(locale, 'start.open')}</button>
-      <span class="toolbar-spacer"></span>
-      <button id="calibrate-btn" class="tool-btn" type="button" title="${t(locale, 'toolbar.calibrate')} (C)">${t(locale, 'toolbar.calibrate')}</button>
-      <button id="sketch-btn" class="tool-btn" type="button" title="${t(locale, 'toolbar.sketch')} (S)">${t(locale, 'toolbar.sketch')}</button>
-      <button id="mask-btn" class="tool-btn" type="button" title="${t(locale, 'toolbar.mask')} (M)">${t(locale, 'toolbar.mask')}</button>
-      <button id="adjust-btn" class="tool-btn" type="button" title="${t(locale, 'toolbar.adjust')}">${t(locale, 'toolbar.adjust')}</button>
-      <span class="toolbar-spacer"></span>
-      <button id="origin-tool-btn" class="tool-btn" type="button" title="Move (0,0) Coordinate System Origin">🎯 (0,0)</button>
-      <button id="origin-reset-btn" class="tool-btn" type="button" title="Reset (0,0) to bottom-left corner of raster">↺ (0,0)</button>
-      <span class="toolbar-spacer"></span>
-      <button id="save-project" class="tool-btn" type="button" title="${t(locale, 'project.save')}">${t(locale, 'project.save')}</button>
-      <button id="open-project" class="tool-btn" type="button" title="${t(locale, 'project.open')}">${t(locale, 'project.open')}</button>
-      <span class="toolbar-spacer"></span>
-      <button id="zoom-out-btn" class="tool-btn" type="button" title="${t(locale, 'viewer.zoomOut')} (-)">−</button>
-      <button id="fit-btn" class="tool-btn" type="button" title="${t(locale, 'viewer.fit')} (0)">${t(locale, 'viewer.fit')}</button>
-      <button id="zoom-in-btn" class="tool-btn" type="button" title="${t(locale, 'viewer.zoomIn')} (+)">+</button>
-      <span class="toolbar-spacer"></span>
+      <div class="toolbar-group">
+        <button id="toolbar-open" class="tool-btn" type="button" title="${t(locale, 'start.open')}">${t(locale, 'start.open')}</button>
+        <button id="save-project" class="tool-btn" type="button" title="${t(locale, 'project.save')}">${t(locale, 'project.save')}</button>
+        <button id="open-project" class="tool-btn" type="button" title="${t(locale, 'project.open')}">${t(locale, 'project.open')}</button>
+      </div>
+      <span class="toolbar-divider" aria-hidden="true"></span>
+      <div class="toolbar-group">
+        <button id="calibrate-btn" class="tool-btn" type="button" title="${t(locale, 'toolbar.calibrate')} (C)">${t(locale, 'toolbar.calibrate')}</button>
+        <button id="sketch-btn" class="tool-btn" type="button" title="${t(locale, 'toolbar.sketch')} (S)">${t(locale, 'toolbar.sketch')}</button>
+        <button id="mask-btn" class="tool-btn" type="button" title="${t(locale, 'toolbar.mask')} (M)">${t(locale, 'toolbar.mask')}</button>
+        <button id="adjust-btn" class="tool-btn" type="button" title="${t(locale, 'toolbar.adjust')}">${t(locale, 'toolbar.adjust')}</button>
+      </div>
+      <span class="toolbar-divider" aria-hidden="true"></span>
+      <div class="toolbar-group">
+        <button id="origin-tool-btn" class="tool-btn" type="button" title="Move (0,0) Coordinate System Origin">🎯 (0,0)</button>
+        <button id="origin-reset-btn" class="tool-btn" type="button" title="Reset (0,0) to bottom-left corner of raster">↺ (0,0)</button>
+      </div>
+      <span class="toolbar-divider" aria-hidden="true"></span>
+      <div class="toolbar-group">
+        <button id="zoom-out-btn" class="tool-btn" type="button" title="${t(locale, 'viewer.zoomOut')} (-)">−</button>
+        <button id="fit-btn" class="tool-btn" type="button" title="${t(locale, 'viewer.fit')} (0)">${t(locale, 'viewer.fit')}</button>
+        <button id="zoom-in-btn" class="tool-btn" type="button" title="${t(locale, 'viewer.zoomIn')} (+)">+</button>
+      </div>
+      <span class="toolbar-divider" aria-hidden="true"></span>
       <span id="page-nav" class="page-nav" hidden>
         <button id="prev-btn" class="tool-btn" type="button" title="${t(locale, 'pages.prev')}">‹</button>
         <button id="pages-toggle" class="tool-btn" type="button">${t(locale, 'pages.title')}</button>
         <button id="next-btn" class="tool-btn" type="button" title="${t(locale, 'pages.next')}">›</button>
       </span>
     </div>
+  </header>
 
-    <button id="account-btn" class="icon-btn" type="button" aria-label="${t(locale, 'account.login')}" title="${t(locale, 'account.login')}">👤</button>
+  <div class="workspace">
+    <canvas id="viewer" aria-label="RasterFit viewer"></canvas>
 
-    <button id="theme-btn" class="icon-btn" type="button" aria-label="${t(locale, 'theme.toggle')}" title="${t(locale, 'theme.toggle')}">
-      <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
-        <circle cx="12" cy="12" r="5"></circle>
-        <g stroke-linecap="round">
-          <line x1="12" y1="1" x2="12" y2="4"></line>
-          <line x1="12" y1="20" x2="12" y2="23"></line>
-          <line x1="4.22" y1="4.22" x2="6.34" y2="6.34"></line>
-          <line x1="17.66" y1="17.66" x2="19.78" y2="19.78"></line>
-          <line x1="1" y1="12" x2="4" y2="12"></line>
-          <line x1="20" y1="12" x2="23" y2="12"></line>
-          <line x1="4.22" y1="19.78" x2="6.34" y2="17.66"></line>
-          <line x1="17.66" y1="6.34" x2="19.78" y2="4.22"></line>
-        </g>
-      </svg>
-    </button>
+    <aside class="panel" id="pages-panel" aria-label="${t(locale, 'pages.title')}" hidden>
+      <h2 class="panel-title">${t(locale, 'pages.title')}</h2>
+      <ol class="pages-list" id="pages-list"></ol>
+    </aside>
 
-    <input id="file-input" type="file" hidden
-      accept=".pdf,.png,.jpg,.jpeg,.webp,application/pdf,image/png,image/jpeg,image/webp" />
-    <input id="project-input" type="file" hidden accept=".rasterfit.zip,application/zip" />
+    <aside class="panel" id="account-panel" aria-label="${t(locale, 'account.title')}" hidden></aside>
+
+    <aside class="panel panel-wide" id="calibration-panel" aria-label="${t(locale, 'calibrate.title')}" hidden></aside>
+
+    <aside class="panel panel-wide" id="sketch-panel" aria-label="${t(locale, 'sketch.title')}" hidden></aside>
+
+    <aside class="panel panel-wide" id="mask-panel" aria-label="${t(locale, 'mask.title')}" hidden></aside>
+
+    <aside class="panel panel-wide" id="adjust-panel" aria-label="${t(locale, 'adjust.title')}" hidden></aside>
+
+    <main class="start-card" role="main" aria-labelledby="title">
+      <h1 id="title" class="title">${t(locale, 'app.title')}</h1>
+      <p class="tagline">${t(locale, 'app.tagline')}</p>
+      <div class="actions">
+        <button id="open-btn" class="btn btn-primary" type="button">${t(locale, 'start.open')}</button>
+        <button id="sample-btn" class="btn" type="button">${t(locale, 'start.sample')}</button>
+      </div>
+      <p class="privacy">${t(locale, 'start.privacy')}</p>
+    </main>
+
+    <div class="autosave-prompt" id="autosave-prompt" role="alertdialog" aria-labelledby="autosave-text" hidden>
+      <p id="autosave-text">${t(locale, 'autosave.prompt')}</p>
+      <div class="autosave-actions">
+        <button id="continue-btn" class="btn btn-primary" type="button">${t(locale, 'autosave.continue')}</button>
+        <button id="discard-btn" class="btn" type="button">${t(locale, 'autosave.discard')}</button>
+      </div>
+    </div>
   </div>
+
+  <button id="account-btn" class="icon-btn" type="button" aria-label="${t(locale, 'account.login')}" title="${t(locale, 'account.login')}">👤</button>
+
+  <button id="theme-btn" class="icon-btn" type="button" aria-label="${t(locale, 'theme.toggle')}" title="${t(locale, 'theme.toggle')}">
+    <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+      <circle cx="12" cy="12" r="5"></circle>
+      <g stroke-linecap="round">
+        <line x1="12" y1="1" x2="12" y2="4"></line>
+        <line x1="12" y1="20" x2="12" y2="23"></line>
+        <line x1="4.22" y1="4.22" x2="6.34" y2="6.34"></line>
+        <line x1="17.66" y1="17.66" x2="19.78" y2="19.78"></line>
+        <line x1="1" y1="12" x2="4" y2="12"></line>
+        <line x1="20" y1="12" x2="23" y2="12"></line>
+        <line x1="4.22" y1="19.78" x2="6.34" y2="17.66"></line>
+        <line x1="17.66" y1="6.34" x2="19.78" y2="4.22"></line>
+      </g>
+    </svg>
+  </button>
+
+  <input id="file-input" type="file" hidden
+    accept=".pdf,.png,.jpg,.jpeg,.webp,application/pdf,image/png,image/jpeg,image/webp" />
+  <input id="project-input" type="file" hidden accept=".rasterfit.zip,application/zip" />
 
   <section class="auth-screen" id="auth-screen" aria-label="${t(locale, 'account.login')}"></section>
-
-  <main class="start-card" role="main" aria-labelledby="title">
-    <h1 id="title" class="title">${t(locale, 'app.title')}</h1>
-    <p class="tagline">${t(locale, 'app.tagline')}</p>
-    <div class="actions">
-      <button id="open-btn" class="btn btn-primary" type="button">${t(locale, 'start.open')}</button>
-      <button id="sample-btn" class="btn" type="button">${t(locale, 'start.sample')}</button>
-    </div>
-    <p class="privacy">${t(locale, 'start.privacy')}</p>
-  </main>
-
-  <aside class="panel" id="pages-panel" aria-label="${t(locale, 'pages.title')}" hidden>
-    <h2 class="panel-title">${t(locale, 'pages.title')}</h2>
-    <ol class="pages-list" id="pages-list"></ol>
-  </aside>
-
-  <aside class="panel" id="account-panel" aria-label="${t(locale, 'account.title')}" hidden></aside>
-
-  <aside class="panel panel-wide" id="calibration-panel" aria-label="${t(locale, 'calibrate.title')}" hidden></aside>
-
-  <aside class="panel panel-wide" id="sketch-panel" aria-label="${t(locale, 'sketch.title')}" hidden></aside>
-
-  <aside class="panel panel-wide" id="mask-panel" aria-label="${t(locale, 'mask.title')}" hidden></aside>
-
-  <aside class="panel panel-wide" id="adjust-panel" aria-label="${t(locale, 'adjust.title')}" hidden></aside>
-
-  <div class="autosave-prompt" id="autosave-prompt" role="alertdialog" aria-labelledby="autosave-text" hidden>
-    <p id="autosave-text">${t(locale, 'autosave.prompt')}</p>
-    <div class="autosave-actions">
-      <button id="continue-btn" class="btn btn-primary" type="button">${t(locale, 'autosave.continue')}</button>
-      <button id="discard-btn" class="btn" type="button">${t(locale, 'autosave.discard')}</button>
-    </div>
-  </div>
 
   <footer class="status-bar" aria-live="polite" aria-atomic="true">
     <span id="status" class="status-text">${t(locale, 'status.ready')}</span>
