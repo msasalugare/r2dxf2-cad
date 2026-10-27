@@ -617,14 +617,16 @@ export class RasterViewer {
   private drawOriginAxes(ctx: CanvasRenderingContext2D, w: number, h: number): void {
     const orig = this.getOrigin();
     const origScreen = this.rasterToScreen(orig.x, orig.y);
-    // The coordinate-system axes stay screen-aligned (X → right, Y → up), so
-    // levelling rotates only the raster, not the axes themselves.
-    const uxX = 1;
-    const uxY = 0;
-    const lenX = 1;
-    const uyX = 0;
-    const uyY = -1;
-    const lenY = 1;
+    // The axes follow the raster transform, so they rotate together with the
+    // raster during calibration/levelling.
+    const xDirScreen = this.rasterToScreen(orig.x + 100, orig.y);
+    const yDirScreen = this.rasterToScreen(orig.x, orig.y - 100);
+    const uxX = xDirScreen.x - origScreen.x;
+    const uxY = xDirScreen.y - origScreen.y;
+    const lenX = Math.hypot(uxX, uxY) || 1;
+    const uyX = yDirScreen.x - origScreen.x;
+    const uyY = yDirScreen.y - origScreen.y;
+    const lenY = Math.hypot(uyX, uyY) || 1;
 
     ctx.save();
     // Dashed full-canvas axis lines through (0, 0)
