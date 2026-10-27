@@ -42,7 +42,7 @@ body {
   display: flex;
   align-items: center;
   height: var(--appbar-height);
-  padding: 0 calc(var(--target-coarse) * 2 + var(--space-12)) 0 var(--space-12);
+  padding: 0 calc(140px + var(--target-coarse) * 2 + var(--space-16)) 0 var(--space-12);
   background: var(--color-surface-shell);
   border-bottom: var(--border-width) solid var(--color-divider);
   z-index: var(--z-panel);
@@ -233,6 +233,7 @@ html[data-auth='signed-out'] .start-card,
 html[data-auth='signed-out'] .panel,
 html[data-auth='signed-out'] .status-bar,
 html[data-auth='signed-out'] #account-btn,
+html[data-auth='signed-out'] #export-dxf-btn,
 html[data-auth='signed-out'] .autosave-prompt {
   display: none;
 }
@@ -245,7 +246,7 @@ html[data-auth='signed-in'] .auth-screen {
 .icon-btn {
   position: absolute;
   top: 0;
-  right: var(--space-4);
+  right: calc(var(--space-4) * 2 + 140px);
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -274,7 +275,20 @@ html[data-auth='signed-in'] .auth-screen {
 
 /* Account button sits to the left of the theme toggle (both are icon-btn). */
 #account-btn {
-  right: calc(var(--space-4) * 2 + var(--target-coarse));
+  right: calc(var(--space-4) * 3 + 140px + var(--target-coarse));
+}
+
+/* Always-visible blue Export DXF button in the top-right corner. */
+.export-corner {
+  position: absolute;
+  top: 0;
+  right: var(--space-4);
+  height: var(--appbar-height);
+  width: 140px;
+  border-radius: 0;
+  border-top: none;
+  border-bottom: none;
+  z-index: calc(var(--z-status) + 2);
 }
 
 /* --- Status bar -------------------------------------------------------- */

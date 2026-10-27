@@ -26,7 +26,7 @@ test('draws a sketch and solves it via the backend solver', async ({ page }) => 
   await page.mouse.click(b.x, b.y);
 
   await page.locator('#sketch-solve').click();
-  await expect(page.locator('#sketch-result')).toContainText('Solved');
+  await expect(page.locator('#sketch-result')).toContainText('Rešeno');
 
   // Export DXF and verify valid DXF output is downloaded.
   const dxfDownloadPromise = page.waitForEvent('download');
@@ -56,7 +56,7 @@ test('draws a multi-segment polyline chain and finishes on Escape', async ({ pag
   await expect(page.locator('#sketch-finish-chain')).toBeHidden();
 
   await page.locator('#sketch-solve').click();
-  await expect(page.locator('#sketch-result')).toContainText('Solved');
+  await expect(page.locator('#sketch-result')).toContainText('Rešeno');
 });
 
 test('draws a tangent arc in a polyline via the 3-point rim method', async ({ page }) => {
@@ -76,15 +76,15 @@ test('draws a tangent arc in a polyline via the 3-point rim method', async ({ pa
   await page.keyboard.press('m');
   await page.keyboard.press('m');
   await page.keyboard.press('m');
-  await expect(page.locator('#status')).toContainText('tangent');
+  await expect(page.locator('#status')).toContainText('tangenta');
 
   // Second endpoint, then the rim point (3-point definition).
   await page.mouse.click(650, 380);
-  await expect(page.locator('#status')).toContainText('rim');
+  await expect(page.locator('#status')).toContainText('luku');
   await page.mouse.click(575, 320);
 
   // The arc is created (not a guessed radius) and the chain continues.
-  await expect(page.locator('#sketch-panel')).toContainText('Arc #');
+  await expect(page.locator('#sketch-panel')).toContainText('Luk #');
   await page.keyboard.press('Escape');
 });
 
@@ -112,5 +112,5 @@ test('mirrors selected geometry across a line axis', async ({ page }) => {
   await page.mouse.click(640, 350);
 
   // A mirrored copy is created.
-  await expect(page.locator('#sketch-panel')).toContainText('Line #3');
+  await expect(page.locator('#sketch-panel')).toContainText('Linija #3');
 });

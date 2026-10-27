@@ -14,7 +14,7 @@ test('calibration panel opens and reports the empty state', async ({ page }) => 
   await expect(page.locator('#calibration-panel')).toBeVisible();
 
   await page.locator('#cal-solve').click();
-  await expect(page.locator('#status')).toContainText('Add segments');
+  await expect(page.locator('#status')).toContainText('Dodajte segmente');
 });
 
 test('places a segment and solves a calibration', async ({ page }) => {
@@ -44,6 +44,6 @@ test('places a segment and solves a calibration', async ({ page }) => {
   await page.locator('.cal-orientation').first().selectOption('horizontal');
 
   await page.locator('#cal-solve').click();
-  await expect(page.locator('#cal-result')).toContainText('Rotation');
-  await expect(page.locator('#cal-result')).toContainText('Scale');
+  await expect(page.locator('#cal-result')).toContainText('Rotacija');
+  await expect(page.locator('#cal-result')).toContainText('Razmera');
 });

@@ -9,18 +9,18 @@ describe('detectLocale', () => {
     expect(detectLocale('bs')).toBe('sr');
   });
 
-  it('defaults everything else to English', () => {
-    expect(detectLocale('en-US')).toBe('en');
-    expect(detectLocale('de-DE')).toBe('en');
-    expect(detectLocale(undefined)).toBe('en');
-    expect(detectLocale('')).toBe('en');
+  it('defaults everything to Serbian', () => {
+    expect(detectLocale('en-US')).toBe('sr');
+    expect(detectLocale('de-DE')).toBe('sr');
+    expect(detectLocale(undefined)).toBe('sr');
+    expect(detectLocale('')).toBe('sr');
   });
 });
 
 describe('t', () => {
   it('translates a known key in both locales', () => {
-    expect(t('sr', 'start.open')).toBe('Otvori PDF / sliku');
-    expect(t('en', 'start.open')).toBe('Open PDF / image');
+    expect(t('sr', 'start.open')).toBe('Otvori sliku');
+    expect(t('en', 'start.open')).toBe('Open image');
   });
 
   it('has the same key set for both locales', () => {

@@ -579,7 +579,7 @@ export function initApp(): () => void {
   });
   document.querySelector('#save-project')!.addEventListener('click', () => void saveProject());
   document.querySelector('#open-project')!.addEventListener('click', () => projectInput.click());
-  document.querySelector('#toolbar-export-dxf')!.addEventListener('click', () => void sketch.exportDxf());
+  document.querySelector('#export-dxf-btn')!.addEventListener('click', () => void sketch.exportDxf());
   document.querySelector('#prev-btn')!.addEventListener('click', () => void showPage(pageIndex - 1));
   document.querySelector('#next-btn')!.addEventListener('click', () => void showPage(pageIndex + 1));
   document.querySelector('#pages-toggle')!.addEventListener('click', () => {
@@ -768,21 +768,17 @@ function markup(locale: Locale): string {
     <div class="toolbar" role="toolbar" aria-label="Viewer" hidden>
       <div class="toolbar-group">
         <button id="toolbar-open" class="tool-btn" type="button" title="${t(locale, 'start.open')}">📂 ${t(locale, 'start.open')}</button>
-        <button id="save-project" class="tool-btn" type="button" title="${t(locale, 'project.save')}">💾 ${t(locale, 'project.save')}</button>
-        <button id="open-project" class="tool-btn" type="button" title="${t(locale, 'project.open')}">📁 ${t(locale, 'project.open')}</button>
-        <button id="toolbar-export-dxf" class="tool-btn" type="button" title="${t(locale, 'sketch.exportDxf')}">📄 ${t(locale, 'sketch.exportDxf')}</button>
-      </div>
-      <span class="toolbar-divider" aria-hidden="true"></span>
-      <div class="toolbar-group">
+        <button id="adjust-btn" class="tool-btn" type="button" title="${t(locale, 'toolbar.adjust')}">🎚️ ${t(locale, 'toolbar.adjust')}</button>
         <button id="calibrate-btn" class="tool-btn" type="button" title="${t(locale, 'toolbar.calibrate')} (C)">📏 ${t(locale, 'toolbar.calibrate')}</button>
         <button id="sketch-btn" class="tool-btn" type="button" title="${t(locale, 'toolbar.sketch')} (S)">✏️ ${t(locale, 'toolbar.sketch')}</button>
         <button id="mask-btn" class="tool-btn" type="button" title="${t(locale, 'toolbar.mask')} (M)">🖌️ ${t(locale, 'toolbar.mask')}</button>
-        <button id="adjust-btn" class="tool-btn" type="button" title="${t(locale, 'toolbar.adjust')}">🎚️ ${t(locale, 'toolbar.adjust')}</button>
+        <button id="open-project" class="tool-btn" type="button" title="${t(locale, 'project.open')}">📁 ${t(locale, 'project.open')}</button>
+        <button id="save-project" class="tool-btn" type="button" title="${t(locale, 'project.save')}">💾 ${t(locale, 'project.save')}</button>
       </div>
       <span class="toolbar-divider" aria-hidden="true"></span>
       <div class="toolbar-group">
-        <button id="origin-tool-btn" class="tool-btn" type="button" title="Move (0,0) Coordinate System Origin">🎯 (0,0)</button>
-        <button id="origin-reset-btn" class="tool-btn" type="button" title="Reset (0,0) to bottom-left corner of raster">↺ (0,0)</button>
+        <button id="origin-tool-btn" class="tool-btn" type="button" title="Pomeri (0,0) koordinatni početak">🎯 (0,0)</button>
+        <button id="origin-reset-btn" class="tool-btn" type="button" title="Resetuj (0,0) na donji levi ugao">↺ (0,0)</button>
       </div>
       <span class="toolbar-divider" aria-hidden="true"></span>
       <div class="toolbar-group">
@@ -853,6 +849,8 @@ function markup(locale: Locale): string {
       </g>
     </svg>
   </button>
+
+  <button id="export-dxf-btn" class="btn btn-primary export-corner" type="button" title="${t(locale, 'sketch.exportDxf')}">📄 ${t(locale, 'sketch.exportDxf')}</button>
 
   <input id="file-input" type="file" hidden
     accept=".pdf,.png,.jpg,.jpeg,.webp,application/pdf,image/png,image/jpeg,image/webp" />

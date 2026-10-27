@@ -6,7 +6,7 @@ const sr = {
   'app.title': 'RasterFit',
   'app.tagline': 'Precizno fitovanje skice na kalibrisan raster crtež',
   'workspace.label': 'Radni prostor',
-  'start.open': 'Otvori PDF / sliku',
+  'start.open': 'Otvori sliku',
   'start.sample': 'Probaj primer',
   'start.privacy': 'Sve radi lokalno u vašem pregledaču — ništa se ne otprema.',
   'start.drop': 'Pustite datoteku da biste je otvorili',
@@ -179,7 +179,7 @@ const en: Record<keyof typeof sr, string> = {
   'app.title': 'RasterFit',
   'app.tagline': 'Precisely fit a sketch to a calibrated raster drawing',
   'workspace.label': 'Workspace',
-  'start.open': 'Open PDF / image',
+  'start.open': 'Open image',
   'start.sample': 'Try a sample',
   'start.privacy': 'Everything runs locally in your browser — nothing is uploaded.',
   'start.drop': 'Drop a file to open it',
@@ -353,12 +353,9 @@ const messages: Record<Locale, Record<keyof typeof sr, string>> = { sr, en };
 export type MessageKey = keyof typeof sr;
 
 /** Pick the UI locale from a browser language tag; defaults to English. */
-export function detectLocale(navLanguage: string | undefined): Locale {
-  const l = (navLanguage ?? '').toLowerCase();
-  if (l.startsWith('sr') || l.startsWith('hr') || l.startsWith('bs')) {
-    return 'sr';
-  }
-  return 'en';
+export function detectLocale(_navLanguage: string | undefined): Locale {
+  // Serbian-first: the app is presented in Serbian regardless of browser locale.
+  return 'sr';
 }
 
 /** Resolve a message for a locale, with a safe English fallback. */

@@ -47,8 +47,8 @@ test('imports a multi-page PDF and navigates between pages', async ({ page }) =>
   await page.locator('#file-input').setInputFiles(twoPagePdf);
   await expect(page.locator('html')).toHaveAttribute('data-raster', 'loaded');
   await expect(page.locator('html')).toHaveAttribute('data-page-count', '2');
-  await expect(page.locator('#status')).toContainText('Page 1/2');
+  await expect(page.locator('#status')).toContainText('Strana 1/2');
 
   await page.locator('#next-btn').click();
-  await expect(page.locator('#status')).toContainText('Page 2/2');
+  await expect(page.locator('#status')).toContainText('Strana 2/2');
 });

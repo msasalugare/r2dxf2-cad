@@ -223,7 +223,7 @@ export class SketchController {
     };
     const k = key[this.tool];
     if (k) return t(this.locale, k);
-    return this.tool === 'arc3pt' ? '3-Pt Arc' : 'Set (0,0)';
+    return this.tool === 'arc3pt' ? 'Luk 3 tačke' : 'Postavi (0,0)';
   }
 
   /** Reflect a point across the line through `(ax, ay)` and `(bx, by)`. */
@@ -440,7 +440,7 @@ export class SketchController {
     }
     if (this.tool !== 'select') {
       this.setTool('select');
-      this.onStatus('Select / Move mode (Click entities to select, drag to move, or drag box)');
+      this.onStatus('Režim izbora / pomeranja (kliknite da izaberete, prevucite da pomerite)');
       return true;
     }
     if (
@@ -1702,7 +1702,7 @@ export class SketchController {
         this.pushUndo();
         const p1 = this.getOrCreatePoint(rawR.x, rawR.y, altKey);
         this.arc3PtPending = { p1Id: p1.id, x1: p1.x, y1: p1.y };
-        this.onStatus('3-Pt Arc: Click 2nd endpoint (or M for Center-Start-End)');
+        this.onStatus('Luk 3 tačke: kliknite 2. krajnju tačku (ili M za centar-početak-kraj)');
       } else if (this.arc3PtPending.p2Id === undefined) {
         if (Math.hypot(r.x - this.arc3PtPending.x1, r.y - this.arc3PtPending.y1) < 1.5) {
           return true;
@@ -1714,7 +1714,7 @@ export class SketchController {
           x2: p2.x,
           y2: p2.y,
         };
-        this.onStatus('3-Pt Arc: Click 3rd point on rim');
+        this.onStatus('Luk 3 tačke: kliknite 3. tačku na luku');
       } else {
         const { p1Id, x1, y1, p2Id, x2, y2 } = this.arc3PtPending;
         const circ = circumcircleArc(x1, y1, x2!, y2!, r.x, r.y);
@@ -1751,7 +1751,7 @@ export class SketchController {
     if (this.tool === 'arc') {
       if (!this.pending && !this.arcStartPending) {
         this.pending = { x: r.x, y: r.y };
-        this.onStatus('Arc (Center): Click start point on rim (or M for 3-Pt Arc)');
+        this.onStatus('Luk (centar): kliknite početnu tačku na luku (ili M za luk 3 tačke)');
       } else if (this.pending && !this.arcStartPending) {
         this.pushUndo();
         const center = this.getOrCreatePoint(this.pending.x, this.pending.y, altKey);
@@ -1765,7 +1765,7 @@ export class SketchController {
           startAngle,
         };
         this.pending = null;
-        this.onStatus('Arc: Click end angle (hold Alt for reverse sweep)');
+        this.onStatus('Luk: kliknite krajnji ugao (držite Alt za suprotan smer)');
       } else if (this.arcStartPending) {
         const center = this.points.find((p) => p.id === this.arcStartPending!.centerId)!;
         const rawEnd = Math.atan2(r.y - center.y, r.x - center.x);
@@ -2081,7 +2081,7 @@ export class SketchController {
           this.onChange?.();
           this.onStatus(t(this.locale, 'sketch.finishChain'));
         } else {
-          this.onStatus('Arc: three points are collinear — click a different rim point');
+          this.onStatus('Luk: tri tačke su kolinearne — kliknite drugu tačku na luku');
         }
         this.viewer.requestRender();
         return true;
@@ -2141,8 +2141,8 @@ export class SketchController {
             this.pending = null;
             this.onStatus(
               this.polyMode === 'arc'
-                ? 'Tangent arc: click a point on the rim'
-                : 'Arc: click a point on the rim',
+                ? 'Tangentni luk: kliknite tačku na luku'
+                : 'Luk: kliknite tačku na luku',
             );
             this.render();
             this.viewer.requestRender();
@@ -3751,15 +3751,15 @@ export class SketchController {
     const elementsHtml = [
       ...this.lines.map(
         (l) =>
-          `<li class="cal-segment"><span class="cal-label">Line #${l.id} (P${l.a}→P${l.b})${l.construction ? ' [C]' : ''}</span><button class="sketch-el-sel btn" type="button" data-kind="line" data-id="${l.id}">${this.selectedLines.includes(l.id) ? '✓' : 'Sel'}</button></li>`,
+          `<li class="cal-segment"><span class="cal-label">Linija #${l.id} (P${l.a}→P${l.b})${l.construction ? ' [C]' : ''}</span><button class="sketch-el-sel btn" type="button" data-kind="line" data-id="${l.id}">${this.selectedLines.includes(l.id) ? '✓' : 'Izb'}</button></li>`,
       ),
       ...this.circles.map(
         (c) =>
-          `<li class="cal-segment"><span class="cal-label">Circle #${c.id} (R=${c.radius.toFixed(1)})${c.construction ? ' [C]' : ''}</span><button class="sketch-el-sel btn" type="button" data-kind="circle" data-id="${c.id}">${this.selectedCircles.includes(c.id) ? '✓' : 'Sel'}</button></li>`,
+          `<li class="cal-segment"><span class="cal-label">Kružnica #${c.id} (R=${c.radius.toFixed(1)})${c.construction ? ' [C]' : ''}</span><button class="sketch-el-sel btn" type="button" data-kind="circle" data-id="${c.id}">${this.selectedCircles.includes(c.id) ? '✓' : 'Izb'}</button></li>`,
       ),
       ...this.arcs.map(
         (a) =>
-          `<li class="cal-segment"><span class="cal-label">Arc #${a.id} (R=${a.radius.toFixed(1)})${a.construction ? ' [C]' : ''}</span><button class="sketch-el-sel btn" type="button" data-kind="arc" data-id="${a.id}">${this.selectedArcs.includes(a.id) ? '✓' : 'Sel'}</button></li>`,
+          `<li class="cal-segment"><span class="cal-label">Luk #${a.id} (R=${a.radius.toFixed(1)})${a.construction ? ' [C]' : ''}</span><button class="sketch-el-sel btn" type="button" data-kind="arc" data-id="${a.id}">${this.selectedArcs.includes(a.id) ? '✓' : 'Izb'}</button></li>`,
       ),
     ].join('');
 
@@ -3771,21 +3771,21 @@ export class SketchController {
         <button id="sketch-close" class="tool-btn" type="button" aria-label="${t(locale, 'calibrate.close')}">×</button>
       </div>
       ${solverBannerHtml}
-      <p class="cal-hint">${selectionSummary ? `Sel: ${escapeHtml(selectionSummary)}` : t(locale, this.pending || this.arcStartPending || this.arc3PtPending ? 'sketch.finishChain' : 'sketch.hint')}</p>
+      <p class="cal-hint">${selectionSummary ? `Izb: ${escapeHtml(selectionSummary)}` : t(locale, this.pending || this.arcStartPending || this.arc3PtPending ? 'sketch.finishChain' : 'sketch.hint')}</p>
 
-      <details class="sketch-toolbar-box" role="group" open aria-label="Selection & Coordinate System Toolbar">
-        <summary class="sketch-toolbar-title">1 · Selection & Coordinate System (0,0)</summary>
+      <details class="sketch-toolbar-box" role="group" open aria-label="Izbor i koordinatni sistem">
+        <summary class="sketch-toolbar-title">1 · Izbor i koordinatni sistem (0,0)</summary>
         <div class="cal-actions">
-          <button id="sketch-tool-select" class="btn ${this.tool === 'select' ? 'btn-tool-active' : ''}" type="button" title="${t(locale, 'sketch.tool.select')}">↖ Select / Move (V)</button>
-          <button id="sketch-tool-origin" class="btn ${this.tool === 'origin' ? 'btn-tool-active' : ''}" type="button" title="Move (0,0) Coordinate System Origin">🎯 Set (0,0) [${Math.round(orig.x)}, ${Math.round(orig.y)}]</button>
-          <button id="sketch-origin-reset" class="btn" type="button" title="Reset (0,0) to bottom-left corner of raster">↺ (0,0) Bottom-Left</button>
+          <button id="sketch-tool-select" class="btn ${this.tool === 'select' ? 'btn-tool-active' : ''}" type="button" title="${t(locale, 'sketch.tool.select')}">↖ Izaberi / Pomeri (V)</button>
+          <button id="sketch-tool-origin" class="btn ${this.tool === 'origin' ? 'btn-tool-active' : ''}" type="button" title="Pomeri (0,0) koordinatni početak">🎯 Postavi (0,0) [${Math.round(orig.x)}, ${Math.round(orig.y)}]</button>
+          <button id="sketch-origin-reset" class="btn" type="button" title="Resetuj (0,0) na donji levi ugao">↺ (0,0) Donji levi</button>
           <button id="sketch-undo" class="btn" type="button" title="${t(locale, 'sketch.undo')}">↶</button>
           <button id="sketch-redo" class="btn" type="button" title="${t(locale, 'sketch.redo')}">↷</button>
           <button id="sketch-delete" class="btn" type="button" title="${t(locale, 'sketch.delete')}">🗑</button>
         </div>
         <div class="cal-actions">
-          <label class="cal-label"><input id="sketch-raster-snap" type="checkbox" ${this.rasterSnapEnabled ? 'checked' : ''} /> 🧲 Raster Snap</label>
-          <label class="cal-label"><input id="sketch-pin-raster" type="checkbox" ${this.autoPinRaster ? 'checked' : ''} /> 📌 Pin to Raster</label>
+          <label class="cal-label"><input id="sketch-raster-snap" type="checkbox" ${this.rasterSnapEnabled ? 'checked' : ''} /> 🧲 Snap na raster</label>
+          <label class="cal-label"><input id="sketch-pin-raster" type="checkbox" ${this.autoPinRaster ? 'checked' : ''} /> 📌 Prikvači na raster</label>
           <label class="cal-label"><input id="sketch-loupe" type="checkbox" ${this.loupeEnabled ? 'checked' : ''} /> 🔍 8×</label>
           <label class="cal-label"><input id="sketch-construction" type="checkbox" ${this.constructionMode ? 'checked' : ''} /> ${t(locale, 'sketch.construction')}</label>
           <label class="cal-label"><input id="sketch-auto" type="checkbox" ${this.autoConstraints ? 'checked' : ''} /> ${t(locale, 'sketch.autoConstraint')}</label>
@@ -3793,22 +3793,22 @@ export class SketchController {
         </div>
       </details>
 
-      <details class="sketch-toolbar-box" role="group" open aria-label="Geometry Tools">
-        <summary class="sketch-toolbar-title">2 · Draw & Modify Geometry</summary>
+      <details class="sketch-toolbar-box" role="group" open aria-label="Alati za geometriju">
+        <summary class="sketch-toolbar-title">2 · Crtanje i izmena geometrije</summary>
         <div class="cal-actions">
-          <button id="sketch-tool-polyline" class="btn ${this.tool === 'polyline' ? 'btn-tool-active' : ''}" type="button" title="${t(locale, 'sketch.tool.polyline')}">Polyline (P)</button>
-          <button id="sketch-tool-line" class="btn ${this.tool === 'line' ? 'btn-tool-active' : ''}" type="button" title="${t(locale, 'sketch.tool.line')}">╱ Line (L)</button>
-          <button id="sketch-tool-rect" class="btn ${this.tool === 'rect' ? 'btn-tool-active' : ''}" type="button" title="${t(locale, 'sketch.tool.rect')}">▭ Rect (R)</button>
-          <button id="sketch-tool-center-rect" class="btn ${this.tool === 'centerRect' ? 'btn-tool-active' : ''}" type="button" title="${t(locale, 'sketch.tool.centerRect')}">⊡ C-Rect</button>
+          <button id="sketch-tool-polyline" class="btn ${this.tool === 'polyline' ? 'btn-tool-active' : ''}" type="button" title="${t(locale, 'sketch.tool.polyline')}">Polilinija (P)</button>
+          <button id="sketch-tool-line" class="btn ${this.tool === 'line' ? 'btn-tool-active' : ''}" type="button" title="${t(locale, 'sketch.tool.line')}">╱ Linija (L)</button>
+          <button id="sketch-tool-rect" class="btn ${this.tool === 'rect' ? 'btn-tool-active' : ''}" type="button" title="${t(locale, 'sketch.tool.rect')}">▭ Pravougaonik (R)</button>
+          <button id="sketch-tool-center-rect" class="btn ${this.tool === 'centerRect' ? 'btn-tool-active' : ''}" type="button" title="${t(locale, 'sketch.tool.centerRect')}">⊡ C-Prav.</button>
           <button id="sketch-tool-slot" class="btn ${this.tool === 'slot' ? 'btn-tool-active' : ''}" type="button" title="${t(locale, 'sketch.tool.slot')}">⬭ Slot (S)</button>
-          <button id="sketch-tool-circle" class="btn ${this.tool === 'circle' ? 'btn-tool-active' : ''}" type="button" title="${t(locale, 'sketch.tool.circle')}">◯ Circle (C)</button>
-          <button id="sketch-tool-arc" class="btn ${this.tool === 'arc' ? 'btn-tool-active' : ''}" type="button" title="Center-Start-End Arc (A)">◜ Arc C-S-E (A)</button>
-          <button id="sketch-tool-arc3pt" class="btn ${this.tool === 'arc3pt' ? 'btn-tool-active' : ''}" type="button" title="3-Point Rim Arc (Shift+A or M)">⌒ 3-Pt Arc</button>
-          <button id="sketch-tool-polygon" class="btn ${this.tool === 'polygon' ? 'btn-tool-active' : ''}" type="button" title="${t(locale, 'sketch.tool.polygon')}">⬡ Poly (G)</button>
-          <button id="sketch-tool-fillet" class="btn ${this.tool === 'fillet' ? 'btn-tool-active' : ''}" type="button" title="${t(locale, 'sketch.tool.fillet')}">╭ Fillet (F)</button>
-          <button id="sketch-tool-trim" class="btn ${this.tool === 'trim' ? 'btn-tool-active' : ''}" type="button" title="${t(locale, 'sketch.tool.trim')}">✂ Trim (T)</button>
-          <button id="sketch-tool-mirror" class="btn ${this.tool === 'mirror' ? 'btn-tool-active' : ''}" type="button" title="${t(locale, 'sketch.tool.mirror')}">⇋ Mirror</button>
-          <button id="sketch-tool-point" class="btn ${this.tool === 'point' ? 'btn-tool-active' : ''}" type="button" title="${t(locale, 'sketch.tool.point')}">• Point (O)</button>
+          <button id="sketch-tool-circle" class="btn ${this.tool === 'circle' ? 'btn-tool-active' : ''}" type="button" title="${t(locale, 'sketch.tool.circle')}">◯ Kružnica (C)</button>
+          <button id="sketch-tool-arc" class="btn ${this.tool === 'arc' ? 'btn-tool-active' : ''}" type="button" title="Luk centar-početak-kraj (A)">◜ Luk C-P-K (A)</button>
+          <button id="sketch-tool-arc3pt" class="btn ${this.tool === 'arc3pt' ? 'btn-tool-active' : ''}" type="button" title="Luk 3 tačke (Shift+A ili M)">⌒ Luk 3T</button>
+          <button id="sketch-tool-polygon" class="btn ${this.tool === 'polygon' ? 'btn-tool-active' : ''}" type="button" title="${t(locale, 'sketch.tool.polygon')}">⬡ Poligon (G)</button>
+          <button id="sketch-tool-fillet" class="btn ${this.tool === 'fillet' ? 'btn-tool-active' : ''}" type="button" title="${t(locale, 'sketch.tool.fillet')}">╭ Zaobljenje (F)</button>
+          <button id="sketch-tool-trim" class="btn ${this.tool === 'trim' ? 'btn-tool-active' : ''}" type="button" title="${t(locale, 'sketch.tool.trim')}">✂ Odseci (T)</button>
+          <button id="sketch-tool-mirror" class="btn ${this.tool === 'mirror' ? 'btn-tool-active' : ''}" type="button" title="${t(locale, 'sketch.tool.mirror')}">⇋ Ogledalo</button>
+          <button id="sketch-tool-point" class="btn ${this.tool === 'point' ? 'btn-tool-active' : ''}" type="button" title="${t(locale, 'sketch.tool.point')}">• Tačka (O)</button>
         </div>
         ${
           this.pending || this.arcStartPending || this.arc3PtPending
@@ -3817,60 +3817,60 @@ export class SketchController {
         }
       </details>
 
-      <details class="sketch-toolbar-box" role="group" aria-label="Geometric Constraints">
-        <summary class="sketch-toolbar-title">3 · Geometric Constraints</summary>
+      <details class="sketch-toolbar-box" role="group" aria-label="Geometrijska ograničenja">
+        <summary class="sketch-toolbar-title">3 · Geometrijska ograničenja</summary>
         <div class="cal-actions">
-          <button class="btn sketch-fc-c" data-action="Coincident" type="button" title="Coincident (2 pts)">● Coinc</button>
-          <button class="btn sketch-fc-c" data-action="PointOnObject" type="button" title="Point on Object">⟐ OnObj</button>
-          <button class="btn sketch-fc-c" data-action="Horizontal" type="button" title="Horizontal (H)">━ H</button>
-          <button class="btn sketch-fc-c" data-action="Vertical" type="button" title="Vertical">┃ V</button>
-          <button class="btn sketch-fc-c" data-action="Parallel" type="button" title="Parallel">∥ Par</button>
-          <button class="btn sketch-fc-c" data-action="Perpendicular" type="button" title="Perpendicular (N)">⊥ Perp</button>
-          <button class="btn sketch-fc-c" data-action="Tangent" type="button" title="Tangent">⌓ Tan</button>
-          <button class="btn sketch-fc-c" data-action="Equal" type="button" title="Equal (E)">= Eq</button>
-          <button class="btn sketch-fc-c" data-action="Symmetric" type="button" title="Symmetric">>< Sym</button>
-          <button class="btn sketch-fc-c" data-action="Midpoint" type="button" title="Midpoint">M Mid</button>
-          <button class="btn sketch-fc-c" data-action="Collinear" type="button" title="Collinear">∥ Col</button>
-          <button class="btn sketch-fc-c" data-action="Block" type="button" title="Block / Fix to Raster (B)">🔒 Fix</button>
+          <button class="btn sketch-fc-c" data-action="Coincident" type="button" title="Podudarnost (2 tačke)">● Podud.</button>
+          <button class="btn sketch-fc-c" data-action="PointOnObject" type="button" title="Tačka na objektu">⟐ NaObj</button>
+          <button class="btn sketch-fc-c" data-action="Horizontal" type="button" title="Horizontalno (H)">━ H</button>
+          <button class="btn sketch-fc-c" data-action="Vertical" type="button" title="Vertikalno">┃ V</button>
+          <button class="btn sketch-fc-c" data-action="Parallel" type="button" title="Paralelno">∥ Par</button>
+          <button class="btn sketch-fc-c" data-action="Perpendicular" type="button" title="Normalno (N)">⊥ Norm</button>
+          <button class="btn sketch-fc-c" data-action="Tangent" type="button" title="Tangenta">⌓ Tan</button>
+          <button class="btn sketch-fc-c" data-action="Equal" type="button" title="Jednako (E)">= Jedn</button>
+          <button class="btn sketch-fc-c" data-action="Symmetric" type="button" title="Simetrija">>< Sim</button>
+          <button class="btn sketch-fc-c" data-action="Midpoint" type="button" title="Središte">M Sred</button>
+          <button class="btn sketch-fc-c" data-action="Collinear" type="button" title="Kolinearno">∥ Kol</button>
+          <button class="btn sketch-fc-c" data-action="Block" type="button" title="Fiksiraj na raster (B)">🔒 Fiks</button>
         </div>
       </details>
 
-      <details class="sketch-toolbar-box" role="group" aria-label="Dimensional Constraints">
-        <summary class="sketch-toolbar-title">4 · Dimensional Constraints</summary>
+      <details class="sketch-toolbar-box" role="group" aria-label="Dimenziona ograničenja">
+        <summary class="sketch-toolbar-title">4 · Dimenziona ograničenja</summary>
         <div class="cal-actions">
-          <button class="btn sketch-fc-c" data-action="Distance" type="button" title="Distance / Length (D)">↔ Dist</button>
-          <button class="btn sketch-fc-c" data-action="HorizontalDistance" type="button" title="Horizontal Distance">ΔX</button>
-          <button class="btn sketch-fc-c" data-action="VerticalDistance" type="button" title="Vertical Distance">ΔY</button>
-          <button class="btn sketch-fc-c" data-action="Radius" type="button" title="Radius">R Rad</button>
-          <button class="btn sketch-fc-c" data-action="Diameter" type="button" title="Diameter">⌀ Dia</button>
-          <button class="btn sketch-fc-c" data-action="Angle" type="button" title="Angle">∠ Ang</button>
+          <button class="btn sketch-fc-c" data-action="Distance" type="button" title="Rastojanje / dužina (D)">↔ Rast</button>
+          <button class="btn sketch-fc-c" data-action="HorizontalDistance" type="button" title="Horizontalno rastojanje">ΔX</button>
+          <button class="btn sketch-fc-c" data-action="VerticalDistance" type="button" title="Vertikalno rastojanje">ΔY</button>
+          <button class="btn sketch-fc-c" data-action="Radius" type="button" title="Poluprečnik">R Pol</button>
+          <button class="btn sketch-fc-c" data-action="Diameter" type="button" title="Prečnik">⌀ Pre</button>
+          <button class="btn sketch-fc-c" data-action="Angle" type="button" title="Ugao">∠ Ugao</button>
         </div>
         <div class="cal-actions">
           <select id="sketch-c-type" class="cal-orientation" aria-label="${t(locale, 'sketch.constraints')}">
-            <option value="Horizontal">Horizontal (line)</option>
-            <option value="Vertical">Vertical (line)</option>
-            <option value="HorizontalPoints">Horizontal (p1, p2)</option>
-            <option value="VerticalPoints">Vertical (p1, p2)</option>
-            <option value="LineLength">LineLength (line, d)</option>
-            <option value="Distance">Distance (p1, p2, d)</option>
-            <option value="DistancePointLine">DistPtLine (pt, line, d)</option>
-            <option value="HorizontalDistance">Horiz Dist (p1, p2, d)</option>
-            <option value="VerticalDistance">Vert Dist (p1, p2, d)</option>
-            <option value="Parallel">Parallel (l1, l2)</option>
-            <option value="Perpendicular">Perpendicular (l1, l2)</option>
-            <option value="TangentLineCircle">Tangent (line, circle)</option>
-            <option value="EqualLength">EqualLength (l1, l2)</option>
-            <option value="EqualRadius">EqualRadius (c1, c2)</option>
-            <option value="Coincident">Coincident (p1, p2)</option>
-            <option value="PointOnLine">PointOnLine (pt, line)</option>
-            <option value="PointOnCircle">PointOnCircle (pt, circle)</option>
-            <option value="Midpoint">Midpoint (pt, line)</option>
-            <option value="Collinear">Collinear (l1, l2)</option>
-            <option value="Radius">Radius (circle, r)</option>
-            <option value="Diameter">Diameter (circle, d)</option>
-            <option value="Angle">Angle (l1, l2, deg)</option>
-            <option value="AngleLine">AngleLine (line, deg)</option>
-            <option value="FixedPoint">FixedPoint (pt)</option>
+            <option value="Horizontal">Horizontalno (linija)</option>
+            <option value="Vertical">Vertikalno (linija)</option>
+            <option value="HorizontalPoints">Horizontalno (p1, p2)</option>
+            <option value="VerticalPoints">Vertikalno (p1, p2)</option>
+            <option value="LineLength">Dužina linije (linija, d)</option>
+            <option value="Distance">Rastojanje (p1, p2, d)</option>
+            <option value="DistancePointLine">Rast. tačka-linija (tačka, linija, d)</option>
+            <option value="HorizontalDistance">Horiz. rast. (p1, p2, d)</option>
+            <option value="VerticalDistance">Vert. rast. (p1, p2, d)</option>
+            <option value="Parallel">Paralelno (l1, l2)</option>
+            <option value="Perpendicular">Normalno (l1, l2)</option>
+            <option value="TangentLineCircle">Tangenta (linija, kružnica)</option>
+            <option value="EqualLength">Jednake dužine (l1, l2)</option>
+            <option value="EqualRadius">Jednak poluprečnik (c1, c2)</option>
+            <option value="Coincident">Podudarnost (p1, p2)</option>
+            <option value="PointOnLine">Tačka na liniji (tačka, linija)</option>
+            <option value="PointOnCircle">Tačka na kružnici (tačka, kružnica)</option>
+            <option value="Midpoint">Središte (tačka, linija)</option>
+            <option value="Collinear">Kolinearno (l1, l2)</option>
+            <option value="Radius">Poluprečnik (kružnica, r)</option>
+            <option value="Diameter">Prečnik (kružnica, d)</option>
+            <option value="Angle">Ugao (l1, l2, °)</option>
+            <option value="AngleLine">Ugao linije (linija, °)</option>
+            <option value="FixedPoint">Fiksna tačka (tačka)</option>
           </select>
           <input id="sketch-c-e1" class="cal-length w-38" type="number" value="1" aria-label="ID 1" />
           <input id="sketch-c-e2" class="cal-length w-38" type="number" value="2" aria-label="ID 2" />
@@ -3879,8 +3879,8 @@ export class SketchController {
         </div>
       </details>
 
-      <details class="sketch-toolbar-box" role="group" open aria-label="Solver, Fit & Export">
-        <summary class="sketch-toolbar-title">5 · Solver, RasterFit & Export</summary>
+      <details class="sketch-toolbar-box" role="group" open aria-label="Rešavanje, fit i izvoz">
+        <summary class="sketch-toolbar-title">5 · Rešavanje, RasterFit i izvoz</summary>
         <div class="cal-actions">
           <button id="sketch-solve" class="btn btn-primary" type="button">${t(locale, 'sketch.solve')}</button>
           <button id="sketch-fit" class="btn" type="button">${t(locale, 'sketch.fit')}</button>
