@@ -87,3 +87,30 @@ test('draws a tangent arc in a polyline via the 3-point rim method', async ({ pa
   await expect(page.locator('#sketch-panel')).toContainText('Arc #');
   await page.keyboard.press('Escape');
 });
+
+test('mirrors selected geometry across a line axis', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 720 });
+  await page.goto('/');
+  await page.locator('#sample-btn').click();
+  await expect(page.locator('html')).toHaveAttribute('data-raster', 'loaded');
+  await page.locator('#sketch-btn').click();
+  await expect(page.locator('#sketch-panel')).toBeVisible();
+
+  // Vertical axis line, then a shape line.
+  await page.locator('#sketch-tool-line').click();
+  await page.mouse.click(640, 150);
+  await page.mouse.click(640, 550); // axis
+  await page.mouse.click(700, 200);
+  await page.mouse.click(800, 300); // shape
+
+  // Select the shape line (click to select), then mirror across the axis.
+  await page.locator('#sketch-tool-select').click();
+  await page.mouse.click(750, 250);
+  await expect(page.locator('#sketch-panel .cal-hint')).toContainText('Ln#');
+
+  await page.locator('#sketch-tool-mirror').click();
+  await page.mouse.click(640, 350);
+
+  // A mirrored copy is created.
+  await expect(page.locator('#sketch-panel')).toContainText('Line #3');
+});

@@ -50,6 +50,7 @@ export type SketchTool =
   | 'polygon'
   | 'fillet'
   | 'trim'
+  | 'mirror'
   | 'point'
   | 'origin'
   | 'select';
@@ -138,6 +139,7 @@ export class SketchController {
     | { kind: 'arc-start' | 'arc-end' | 'arc-rim'; id: number }
     | { kind: 'box'; x0: number; y0: number; x1: number; y1: number }
     | null = null;
+  private dragMoved = false;
   private hoverEntity: {
     kind: 'point' | 'line' | 'circle' | 'arc' | 'origin';
     id: number;
@@ -215,12 +217,140 @@ export class SketchController {
       polygon: 'sketch.tool.polygon',
       fillet: 'sketch.tool.fillet',
       trim: 'sketch.tool.trim',
+      mirror: 'sketch.tool.mirror',
       point: 'sketch.tool.point',
       select: 'sketch.tool.select',
     };
     const k = key[this.tool];
     if (k) return t(this.locale, k);
     return this.tool === 'arc3pt' ? '3-Pt Arc' : 'Set (0,0)';
+  }
+
+  /** Reflect a point across the line through `(ax, ay)` and `(bx, by)`. */
+  private reflectPoint(
+    px: number,
+    py: number,
+    ax: number,
+    ay: number,
+    bx: number,
+    by: number,
+  ): { x: number; y: number } {
+    const dx = bx - ax;
+    const dy = by - ay;
+    const len2 = dx * dx + dy * dy;
+    if (len2 < 1e-9) return { x: px, y: py };
+    const t = ((px - ax) * dx + (py - ay) * dy) / len2;
+    const cx = ax + t * dx;
+    const cy = ay + t * dy;
+    return { x: 2 * cx - px, y: 2 * cy - py };
+  }
+
+  /**
+   * Create an axisymmetric (mirrored) copy of the selected geometry across the
+   * given axis line. The original geometry is preserved; new reflected entities
+   * are appended.
+   */
+  private mirrorSelection(axis: SavedSketchLine): void {
+    const pa = this.points.find((p) => p.id === axis.a);
+    const pb = this.points.find((p) => p.id === axis.b);
+    if (!pa || !pb) return;
+
+    const hasSelection =
+      this.selectedPoints.length +
+        this.selectedLines.length +
+        this.selectedCircles.length +
+        this.selectedArcs.length >
+      0;
+    if (!hasSelection) return;
+
+    // Collect every point id referenced by the selection.
+    const pointIds = new Set<number>();
+    for (const id of this.selectedPoints) pointIds.add(id);
+    for (const id of this.selectedLines) {
+      const l = this.lines.find((x) => x.id === id);
+      if (l) {
+        pointIds.add(l.a);
+        pointIds.add(l.b);
+      }
+    }
+    for (const id of this.selectedCircles) {
+      const c = this.circles.find((x) => x.id === id);
+      if (c) pointIds.add(c.center);
+    }
+    for (const id of this.selectedArcs) {
+      const a = this.arcs.find((x) => x.id === id);
+      if (a) {
+        pointIds.add(a.center);
+        if (a.startPt !== undefined) pointIds.add(a.startPt);
+        if (a.endPt !== undefined) pointIds.add(a.endPt);
+      }
+    }
+
+    // Reflect every involved point and remember the id mapping.
+    const map = new Map<number, number>();
+    for (const id of pointIds) {
+      const p = this.points.find((x) => x.id === id);
+      if (!p) continue;
+      const r = this.reflectPoint(p.x, p.y, pa.x, pa.y, pb.x, pb.y);
+      const np = this.getOrCreatePoint(r.x, r.y, true, true);
+      map.set(id, np.id);
+    }
+
+    // Mirror lines.
+    for (const id of this.selectedLines) {
+      const l = this.lines.find((x) => x.id === id);
+      if (!l) continue;
+      const a2 = map.get(l.a);
+      const b2 = map.get(l.b);
+      if (a2 === undefined || b2 === undefined) continue;
+      this.lines.push({ id: this.nextLineId(), a: a2, b: b2, construction: l.construction });
+    }
+
+    // Mirror circles.
+    for (const id of this.selectedCircles) {
+      const c = this.circles.find((x) => x.id === id);
+      if (!c) continue;
+      const c2 = map.get(c.center);
+      if (c2 === undefined) continue;
+      this.circles.push({
+        id: this.nextCircleId(),
+        center: c2,
+        radius: c.radius,
+        construction: c.construction,
+      });
+    }
+
+    // Mirror arcs (reflection reverses the sweep direction, so start/end swap).
+    for (const id of this.selectedArcs) {
+      const a = this.arcs.find((x) => x.id === id);
+      if (!a) continue;
+      const center = this.points.find((p) => p.id === a.center);
+      const c2 = map.get(a.center);
+      const center2 = c2 !== undefined ? this.points.find((p) => p.id === c2) : undefined;
+      if (!center || !center2) continue;
+      const sOrig = {
+        x: center.x + a.radius * Math.cos(a.start),
+        y: center.y + a.radius * Math.sin(a.start),
+      };
+      const eOrig = {
+        x: center.x + a.radius * Math.cos(a.end),
+        y: center.y + a.radius * Math.sin(a.end),
+      };
+      const sRefl = this.reflectPoint(sOrig.x, sOrig.y, pa.x, pa.y, pb.x, pb.y);
+      const eRefl = this.reflectPoint(eOrig.x, eOrig.y, pa.x, pa.y, pb.x, pb.y);
+      this.arcs.push({
+        id: this.nextArcId(),
+        center: c2!,
+        radius: a.radius,
+        start: Math.atan2(eRefl.y - center2.y, eRefl.x - center2.x),
+        end: Math.atan2(sRefl.y - center2.y, sRefl.x - center2.x),
+        startPt: a.endPt !== undefined ? map.get(a.endPt) : undefined,
+        endPt: a.startPt !== undefined ? map.get(a.startPt) : undefined,
+        construction: a.construction,
+      });
+    }
+
+    this.clearSelection();
   }
 
   /** Provide the current page's gray8 buffer for synchronous sub-pixel raster snapping. */
@@ -1058,9 +1188,11 @@ export class SketchController {
     const pScreen = to(r.x, r.y);
 
     if (phase === 'start') {
+      this.dragMoved = false;
       if (this.tool === 'origin') {
         this.dragState = { kind: 'origin' };
-        this.viewer.setOrigin(r.x, r.y);
+        const snapped = this.snapInputCoord(r.x, r.y, this.lastMouse?.altKey ?? false);
+        this.viewer.setOrigin(snapped.x, snapped.y);
         return true;
       }
 
@@ -1132,6 +1264,7 @@ export class SketchController {
     }
 
     if (phase === 'move' && this.dragState) {
+      this.dragMoved = true;
       if (this.dragState.kind === 'box') {
         this.dragState.x1 = pScreen.x;
         this.dragState.y1 = pScreen.y;
@@ -1266,6 +1399,23 @@ export class SketchController {
     }
 
     if (phase === 'end' && this.dragState) {
+      // A click (down+up without movement) toggles selection of the entity.
+      if (!this.dragMoved && this.dragState.kind !== 'box' && this.dragState.kind !== 'origin') {
+        const kind = this.dragState.kind;
+        const id = (this.dragState as { id: number }).id;
+        this.dragState = null;
+        this.dragMoved = false;
+        // Revert the pushUndo() that `start` made in anticipation of a drag.
+        this.undoStack.pop();
+        if (kind === 'point') toggleInArray(this.selectedPoints, id);
+        else if (kind === 'line') toggleInArray(this.selectedLines, id);
+        else if (kind === 'circle') toggleInArray(this.selectedCircles, id);
+        else if (kind === 'arc-start' || kind === 'arc-end' || kind === 'arc-rim')
+          toggleInArray(this.selectedArcs, id);
+        this.render();
+        this.viewer.requestRender();
+        return true;
+      }
       if (this.dragState.kind === 'box') {
         const { x0, y0, x1, y1 } = this.dragState;
         this.dragState = null;
@@ -1501,6 +1651,23 @@ export class SketchController {
           this.notifyDof();
           this.onChange?.();
         }
+      }
+      return true;
+    }
+
+    if (this.tool === 'mirror') {
+      const axis = this.findNearLine(rawR.x, rawR.y, 12);
+      if (axis) {
+        this.pushUndo();
+        this.mirrorSelection(axis);
+        this.setTool('select');
+        void this.solveSilent();
+        this.render();
+        this.viewer.requestRender();
+        this.notifyDof();
+        this.onChange?.();
+      } else {
+        this.onStatus(t(this.locale, 'sketch.mirror.hint'));
       }
       return true;
     }
@@ -3640,6 +3807,7 @@ export class SketchController {
           <button id="sketch-tool-polygon" class="btn ${this.tool === 'polygon' ? 'btn-tool-active' : ''}" type="button" title="${t(locale, 'sketch.tool.polygon')}">⬡ Poly (G)</button>
           <button id="sketch-tool-fillet" class="btn ${this.tool === 'fillet' ? 'btn-tool-active' : ''}" type="button" title="${t(locale, 'sketch.tool.fillet')}">╭ Fillet (F)</button>
           <button id="sketch-tool-trim" class="btn ${this.tool === 'trim' ? 'btn-tool-active' : ''}" type="button" title="${t(locale, 'sketch.tool.trim')}">✂ Trim (T)</button>
+          <button id="sketch-tool-mirror" class="btn ${this.tool === 'mirror' ? 'btn-tool-active' : ''}" type="button" title="${t(locale, 'sketch.tool.mirror')}">⇋ Mirror</button>
           <button id="sketch-tool-point" class="btn ${this.tool === 'point' ? 'btn-tool-active' : ''}" type="button" title="${t(locale, 'sketch.tool.point')}">• Point (O)</button>
         </div>
         ${
@@ -3757,6 +3925,7 @@ export class SketchController {
     this.panel.querySelector('#sketch-tool-polygon')!.addEventListener('click', () => this.setTool('polygon'));
     this.panel.querySelector('#sketch-tool-fillet')!.addEventListener('click', () => this.setTool('fillet'));
     this.panel.querySelector('#sketch-tool-trim')!.addEventListener('click', () => this.setTool('trim'));
+    this.panel.querySelector('#sketch-tool-mirror')!.addEventListener('click', () => this.setTool('mirror'));
     this.panel.querySelector('#sketch-tool-point')!.addEventListener('click', () => this.setTool('point'));
     this.panel.querySelector('#sketch-tool-select')!.addEventListener('click', () => this.setTool('select'));
     this.panel.querySelector('#sketch-tool-origin')!.addEventListener('click', () => this.setTool('origin'));
