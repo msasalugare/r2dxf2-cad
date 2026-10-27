@@ -144,6 +144,7 @@ mod tests {
             }],
             constraints: vec![],
             reference_constraints: vec![],
+            frame: None,
         };
 
         let dxf = export_dxf(&sketch);

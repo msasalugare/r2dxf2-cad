@@ -1047,6 +1047,7 @@ mod tests {
                 Constraint::Distance(PointId::new(2), PointId::new(3), 50.0),
             ],
             reference_constraints: vec![],
+            frame: None,
         }
     }
 
@@ -1136,6 +1137,7 @@ mod tests {
                 Constraint::Distance(PointId::new(2), PointId::new(3), 50.0),
             ],
             reference_constraints: vec![],
+            frame: None,
         };
         let result = fit(
             &sketch,
@@ -1166,6 +1168,7 @@ mod tests {
             arcs: vec![],
             constraints: vec![],
             reference_constraints: vec![],
+            frame: None,
         };
         let samples = build_samples(&sketch, 2.0, false);
         assert!(samples.len() >= 8);
@@ -1217,6 +1220,7 @@ mod tests {
             arcs: vec![],
             constraints: vec![Constraint::Vertical(LineId::new(1))],
             reference_constraints: vec![],
+            frame: None,
         };
 
         // Include mask over the main line only.

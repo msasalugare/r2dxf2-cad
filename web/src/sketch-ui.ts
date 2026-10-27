@@ -1520,13 +1520,18 @@ export class SketchController {
     // When reconstructing over a PDF/raster scan, keep clicked endpoints at their exact raster positions
     // unless the user explicitly applies a Horizontal/Vertical constraint from the toolbar.
     if (!this.autoConstraints || this.viewer.getPage() !== null) return;
-    const dx = Math.abs(b.x - a.x);
-    const dy = Math.abs(b.y - a.y);
-    const len = Math.hypot(dx, dy);
+    // Measure the direction in the coordinate-system frame (screen axes) so that
+    // near-horizontal/vertical detection follows the fixed axes, not the raster.
+    const t = this.viewer.getRasterTransform();
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const screenX = t[0] * dx + t[2] * dy;
+    const screenY = t[1] * dx + t[3] * dy;
+    const len = Math.hypot(screenX, screenY);
     if (len > 2) {
-      if (dy / len < Math.sin((5 * Math.PI) / 180)) {
+      if (Math.abs(screenY) / len < Math.sin((5 * Math.PI) / 180)) {
         this.constraints.push({ Horizontal: lineId });
-      } else if (dx / len < Math.sin((5 * Math.PI) / 180)) {
+      } else if (Math.abs(screenX) / len < Math.sin((5 * Math.PI) / 180)) {
         this.constraints.push({ Vertical: lineId });
       }
     }
@@ -3080,7 +3085,7 @@ export class SketchController {
       return;
     }
     try {
-      const sketch = this.buildSketch();
+      const sketch = this.buildSolveSketch();
       const result = await solveSketch(sketch, true);
       this.applyParams(result.params);
       this.lastSolve = result;
@@ -3098,7 +3103,7 @@ export class SketchController {
       return;
     }
     try {
-      const sketch = this.buildSketch();
+      const sketch = this.buildSolveSketch();
       const result = await solveSketch(sketch, false);
       this.applyParams(result.params);
       this.lastSolve = result;
@@ -3340,6 +3345,18 @@ export class SketchController {
       constraints,
       reference_constraints: [...this.referenceConstraints],
     };
+  }
+
+  /**
+   * Build the sketch for constraint solving, tagging the coordinate-system frame
+   * so Horizontal/Vertical constraints reference the fixed axes instead of the
+   * (possibly levelled) raster pixel axes.
+   */
+  private buildSolveSketch(): SavedSketchData {
+    const sketch = this.buildSketch();
+    const t = this.viewer.getRasterTransform();
+    sketch.frame = [t[0], t[1], t[2], t[3]];
+    return sketch;
   }
 
   /** Apply a FreeCAD Sketcher constraint to the currently selected canvas entities! */

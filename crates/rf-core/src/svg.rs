@@ -192,6 +192,7 @@ mod tests {
             }],
             constraints: vec![],
             reference_constraints: vec![],
+            frame: None,
         };
         let svg = export_svg(&sketch);
         assert!(svg.contains("<line"));

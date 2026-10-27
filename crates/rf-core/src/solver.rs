@@ -433,6 +433,15 @@ pub(crate) fn residual_vec(sketch: &Sketch, p: &[Dual], c: &Constraint) -> Vec<D
         let (ax, ay, bx, by) = line_endpoints(id);
         (bx - ax, by - ay)
     };
+    // Coordinate-system frame: the linear part `[a, b, c, d]` of the raster→screen
+    // affine. Horizontal/Vertical constraints are measured in this frame so they
+    // reference the fixed coordinate-system axes rather than the raw raster axes.
+    let frame = sketch.frame.unwrap_or([1.0, 0.0, 0.0, 1.0]);
+    let (fa, fb, fc, fd) = (frame[0], frame[1], frame[2], frame[3]);
+    let frame_x =
+        |dx: Dual, dy: Dual| Dual::constant(fa, grad_n) * dx + Dual::constant(fc, grad_n) * dy;
+    let frame_y =
+        |dx: Dual, dy: Dual| Dual::constant(fb, grad_n) * dx + Dual::constant(fd, grad_n) * dy;
     let radius = |id| {
         let j = sketch.circle_index(id).expect("circle exists");
         p[2 * n_points + j].clone()
@@ -449,12 +458,12 @@ pub(crate) fn residual_vec(sketch: &Sketch, p: &[Dual], c: &Constraint) -> Vec<D
             vec![bx - ax, by - ay]
         }
         Constraint::Horizontal(l) => {
-            let (_dx, dy) = line_dir(l);
-            vec![dy]
+            let (dx, dy) = line_dir(l);
+            vec![frame_y(dx, dy)]
         }
         Constraint::Vertical(l) => {
-            let (dx, _dy) = line_dir(l);
-            vec![dx]
+            let (dx, dy) = line_dir(l);
+            vec![frame_x(dx, dy)]
         }
         Constraint::Parallel(a, b) => {
             let (ax, ay) = line_dir(a);
@@ -565,14 +574,14 @@ pub(crate) fn residual_vec(sketch: &Sketch, p: &[Dual], c: &Constraint) -> Vec<D
             vec![dist - Dual::constant(d, grad_n)]
         }
         Constraint::HorizontalDistance(a, b, d) => {
-            let (ax, _) = point(a);
-            let (bx, _) = point(b);
-            vec![(bx - ax).abs() - Dual::constant(d, grad_n)]
+            let (ax, ay) = point(a);
+            let (bx, by) = point(b);
+            vec![frame_x(bx - ax, by - ay).abs() - Dual::constant(d, grad_n)]
         }
         Constraint::VerticalDistance(a, b, d) => {
-            let (_, ay) = point(a);
-            let (_, by) = point(b);
-            vec![(by - ay).abs() - Dual::constant(d, grad_n)]
+            let (ax, ay) = point(a);
+            let (bx, by) = point(b);
+            vec![frame_y(bx - ax, by - ay).abs() - Dual::constant(d, grad_n)]
         }
         Constraint::Angle(a, b, target) => {
             let (ax, ay) = line_dir(a);
@@ -621,14 +630,14 @@ pub(crate) fn residual_vec(sketch: &Sketch, p: &[Dual], c: &Constraint) -> Vec<D
             vec![hypot(px - cx, py - cy) - arc_radius(arc)]
         }
         Constraint::HorizontalPoints(a, b) => {
-            let (_, ay) = point(a);
-            let (_, by) = point(b);
-            vec![by - ay]
+            let (ax, ay) = point(a);
+            let (bx, by) = point(b);
+            vec![frame_y(bx - ax, by - ay)]
         }
         Constraint::VerticalPoints(a, b) => {
-            let (ax, _) = point(a);
-            let (bx, _) = point(b);
-            vec![bx - ax]
+            let (ax, ay) = point(a);
+            let (bx, by) = point(b);
+            vec![frame_x(bx - ax, by - ay)]
         }
         Constraint::LineLength(l, d) => {
             let (dx, dy) = line_dir(l);
@@ -894,6 +903,7 @@ mod tests {
                 Constraint::EqualRadiusCircleArc(CircleId::new(20), ArcId::new(30)),
             ],
             reference_constraints: vec![],
+            frame: None,
         };
         assert_jacobian(&s);
     }
@@ -1125,6 +1135,55 @@ mod tests {
             (res.params[4] - 10.0).abs() < 1e-3,
             "free end x drifted: {}",
             res.params[4]
+        );
+    }
+
+    #[test]
+    fn horizontal_vertical_reference_coordinate_frame() {
+        // Levelling rotates the raster on screen while the coordinate-system axes
+        // stay screen-aligned. With a frame rotation of +30° (screen clockwise),
+        // a raster-space direction `(cos θ, -sin θ)` is horizontal *on screen*,
+        // i.e. horizontal in the coordinate system.
+        let theta = 30f64.to_radians();
+        let (s, c) = (theta.sin(), theta.cos());
+
+        // Horizontal: nearly horizontal in the frame, but not raster-horizontal.
+        let mut h = Sketch {
+            points: vec![p(1, 0.0, 0.0), p(2, c, -s + 0.2)],
+            lines: vec![line(1, 1, 2)],
+            constraints: vec![Constraint::Horizontal(LineId::new(1))],
+            ..Default::default()
+        };
+        h.frame = Some([c, s, -s, c]);
+        let res = solve(&h);
+        assert!(res.converged, "max residual {}", res.max_residual);
+        // Frame-horizontal means the frame-space y component of the direction is 0.
+        let frame_y = s * (res.params[2] - res.params[0]) + c * (res.params[3] - res.params[1]);
+        assert!(
+            frame_y.abs() < 1e-6,
+            "horizontal frame-y residual {frame_y}"
+        );
+        assert!(
+            (res.params[3] - res.params[1]).abs() > 0.1,
+            "expected a non-raster-horizontal result"
+        );
+
+        // Vertical: nearly vertical in the frame (raster direction `(sin θ, cos θ)`).
+        let mut v = Sketch {
+            points: vec![p(1, 0.0, 0.0), p(2, s + 0.2, c)],
+            lines: vec![line(1, 1, 2)],
+            constraints: vec![Constraint::Vertical(LineId::new(1))],
+            ..Default::default()
+        };
+        v.frame = Some([c, s, -s, c]);
+        let res = solve(&v);
+        assert!(res.converged, "max residual {}", res.max_residual);
+        // Frame-vertical means the frame-space x component of the direction is 0.
+        let frame_x = c * (res.params[2] - res.params[0]) - s * (res.params[3] - res.params[1]);
+        assert!(frame_x.abs() < 1e-6, "vertical frame-x residual {frame_x}");
+        assert!(
+            (res.params[2] - res.params[0]).abs() > 0.1,
+            "expected a non-raster-vertical result"
         );
     }
 }

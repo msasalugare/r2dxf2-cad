@@ -122,6 +122,13 @@ pub struct Sketch {
     /// (non-driving: measured for reporting, excluded from the solver system).
     #[serde(default)]
     pub reference_constraints: Vec<usize>,
+    /// Optional coordinate-system frame: the linear part `[a, b, c, d]` of the
+    /// raster→screen affine (rotation ± reflection; scale/translation do not
+    /// affect direction). When present, the Horizontal/Vertical family of
+    /// constraints is measured in this frame (relative to the fixed
+    /// coordinate-system axes) instead of the raw raster pixel axes.
+    #[serde(default)]
+    pub frame: Option<[f64; 4]>,
 }
 
 impl Sketch {

@@ -54,6 +54,9 @@ export interface SavedSketchData {
   arcs: SavedSketchArc[];
   constraints: Record<string, unknown>[];
   reference_constraints?: number[];
+  /** Linear part `[a, b, c, d]` of the raster→screen affine; H/V constraints are
+   *  measured in this frame (coordinate-system axes) when present. */
+  frame?: [number, number, number, number];
 }
 
 /**
