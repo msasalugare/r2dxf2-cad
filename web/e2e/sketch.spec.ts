@@ -58,3 +58,32 @@ test('draws a multi-segment polyline chain and finishes on Escape', async ({ pag
   await page.locator('#sketch-solve').click();
   await expect(page.locator('#sketch-result')).toContainText('Solved');
 });
+
+test('draws a tangent arc in a polyline via the 3-point rim method', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 720 });
+  await page.goto('/');
+  await page.locator('#sample-btn').click();
+  await expect(page.locator('html')).toHaveAttribute('data-raster', 'loaded');
+  await page.locator('#sketch-btn').click();
+  await expect(page.locator('#sketch-panel')).toBeVisible();
+
+  await page.locator('#sketch-tool-polyline').click();
+  // First line segment (two clicks).
+  await page.mouse.click(300, 500);
+  await page.mouse.click(500, 500);
+
+  // Cycle to tangent-arc mode: line -> perp -> tangent -> arc (3×M).
+  await page.keyboard.press('m');
+  await page.keyboard.press('m');
+  await page.keyboard.press('m');
+  await expect(page.locator('#status')).toContainText('tangent');
+
+  // Second endpoint, then the rim point (3-point definition).
+  await page.mouse.click(650, 380);
+  await expect(page.locator('#status')).toContainText('rim');
+  await page.mouse.click(575, 320);
+
+  // The arc is created (not a guessed radius) and the chain continues.
+  await expect(page.locator('#sketch-panel')).toContainText('Arc #');
+  await page.keyboard.press('Escape');
+});

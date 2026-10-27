@@ -142,6 +142,22 @@ body {
   border-color: var(--color-accent-active);
 }
 
+/* Active sketch tool: a clear accent rectangle (distinct from primary-action
+   buttons), so the current tool is unmistakable even in the dense panel. */
+.btn-tool-active {
+  color: var(--color-accent);
+  background: var(--color-selection-surface);
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 1px var(--color-accent);
+  font-weight: var(--font-weight-semibold);
+}
+
+.btn-tool-active:hover {
+  color: var(--color-accent);
+  background: var(--color-selection-surface);
+  border-color: var(--color-accent);
+}
+
 .privacy {
   margin: var(--space-16) 0 0;
   font-size: var(--font-size-secondary);

@@ -27,7 +27,7 @@ import {
   type FitResponse,
   type SolveResponse,
 } from './backend';
-import { t, tf, type Locale } from './i18n';
+import { t, tf, type Locale, type MessageKey } from './i18n';
 import type {
   SavedSketchArc,
   SavedSketchCircle,
@@ -117,6 +117,19 @@ export class SketchController {
     x2?: number;
     y2?: number;
   } | null = null;
+  /** 3-point arc pending within a polyline: joint (a) + end (b) set, waiting for the rim point. */
+  private polyArcPending: {
+    aId: number;
+    ax: number;
+    ay: number;
+    bId: number;
+    bx: number;
+    by: number;
+    startId: number;
+    prevLineId?: number;
+    prevArcId?: number;
+    tangent: boolean;
+  } | null = null;
   private dragState:
     | { kind: 'origin' }
     | { kind: 'point'; id: number; lastX: number; lastY: number }
@@ -175,6 +188,39 @@ export class SketchController {
       return this.hoverEntity ? 'move' : 'default';
     }
     return 'crosshair';
+  }
+
+  /** Localized label for the current tool (with polyline sub-mode). */
+  toolLabel(): string {
+    if (this.tool === 'polyline') {
+      const sub =
+        this.polyMode === 'arc'
+          ? t(this.locale, 'sketch.polyArc')
+          : this.polyMode === 'arc-free'
+            ? t(this.locale, 'sketch.polyArcFree')
+            : this.polyMode === 'perp'
+              ? t(this.locale, 'sketch.polyPerp')
+              : this.polyMode === 'tangent'
+                ? t(this.locale, 'sketch.polyTangent')
+                : t(this.locale, 'sketch.polyLine');
+      return `${t(this.locale, 'sketch.tool.polyline')} · ${sub}`;
+    }
+    const key: Record<string, MessageKey> = {
+      line: 'sketch.tool.line',
+      rect: 'sketch.tool.rect',
+      centerRect: 'sketch.tool.centerRect',
+      slot: 'sketch.tool.slot',
+      circle: 'sketch.tool.circle',
+      arc: 'sketch.tool.arc',
+      polygon: 'sketch.tool.polygon',
+      fillet: 'sketch.tool.fillet',
+      trim: 'sketch.tool.trim',
+      point: 'sketch.tool.point',
+      select: 'sketch.tool.select',
+    };
+    const k = key[this.tool];
+    if (k) return t(this.locale, k);
+    return this.tool === 'arc3pt' ? '3-Pt Arc' : 'Set (0,0)';
   }
 
   /** Provide the current page's gray8 buffer for synchronous sub-pixel raster snapping. */
@@ -244,10 +290,11 @@ export class SketchController {
       this.viewer.requestRender();
       return true;
     }
-    if (this.pending || this.arcStartPending || this.arc3PtPending) {
+    if (this.pending || this.arcStartPending || this.arc3PtPending || this.polyArcPending) {
       this.pending = null;
       this.arcStartPending = null;
       this.arc3PtPending = null;
+      this.polyArcPending = null;
       this.render();
       this.viewer.requestRender();
       this.onStatus(t(this.locale, 'status.ready'));
@@ -326,6 +373,7 @@ export class SketchController {
     this.pending = null;
     this.arcStartPending = null;
     this.arc3PtPending = null;
+    this.polyArcPending = null;
     this.clearSelection();
     void this.solveSilent();
     if (this.active) this.render();
@@ -347,6 +395,7 @@ export class SketchController {
     this.pending = null;
     this.arcStartPending = null;
     this.arc3PtPending = null;
+    this.polyArcPending = null;
     this.dragState = null;
     this.hoverEntity = null;
     this.panel.hidden = true;
@@ -394,6 +443,7 @@ export class SketchController {
     this.pending = null;
     this.arcStartPending = null;
     this.arc3PtPending = null;
+    this.polyArcPending = null;
     void this.solveSilent();
     this.render();
     this.viewer.requestRender();
@@ -526,6 +576,7 @@ export class SketchController {
     this.pending = null;
     this.arcStartPending = null;
     this.arc3PtPending = null;
+    this.polyArcPending = null;
     this.hoverEntity = null;
     this.render();
     this.viewer.requestRender();
@@ -1521,6 +1572,7 @@ export class SketchController {
           this.constraints.push({ PointOnArc: [p2Id!, arcId] });
         }
         this.arc3PtPending = null;
+        this.polyArcPending = null;
         void this.solveSilent();
         this.render();
         this.onStatus(t(this.locale, 'status.ready'));
@@ -1817,6 +1869,59 @@ export class SketchController {
     }
 
     if (this.tool === 'polyline') {
+      // Rim-point click completes a pending 3-point tangent/free arc.
+      if (this.polyArcPending) {
+        const pa = this.polyArcPending;
+        const circ = circumcircleArc(pa.ax, pa.ay, pa.bx, pa.by, r.x, r.y);
+        if (circ) {
+          const cPt = this.getOrCreatePoint(circ.cx, circ.cy, true, true);
+          const arcId = this.nextArcId();
+          const a1 = Math.atan2(pa.ay - circ.cy, pa.ax - circ.cx);
+          const startMatchesA =
+            Math.abs(Math.atan2(Math.sin(circ.startAngle - a1), Math.cos(circ.startAngle - a1))) < 1e-2;
+          this.arcs.push({
+            id: arcId,
+            center: cPt.id,
+            radius: circ.radius,
+            start: circ.startAngle,
+            end: circ.endAngle,
+            startPt: startMatchesA ? pa.aId : pa.bId,
+            endPt: startMatchesA ? pa.bId : pa.aId,
+            construction: this.constructionMode,
+          });
+          this.constraints.push({ PointOnArc: [pa.aId, arcId] });
+          this.constraints.push({ PointOnArc: [pa.bId, arcId] });
+          if (pa.tangent) {
+            if (pa.prevLineId !== undefined) {
+              this.constraints.push({ TangentLineArc: [pa.prevLineId, arcId] });
+            } else if (pa.prevArcId !== undefined) {
+              this.constraints.push({ TangentArcArc: [pa.prevArcId, arcId] });
+            }
+          }
+          // Continue the chain from the arc's end point.
+          this.pending = {
+            x: pa.bx,
+            y: pa.by,
+            pointId: pa.bId,
+            startPointId: pa.startId,
+            lastLineId: undefined,
+            lastArcId: arcId,
+          };
+          this.polyArcPending = null;
+          this.polyMode = 'line';
+          this.resultText = '';
+          void this.solveSilent();
+          this.render();
+          this.notifyDof();
+          this.onChange?.();
+          this.onStatus(t(this.locale, 'sketch.finishChain'));
+        } else {
+          this.onStatus('Arc: three points are collinear — click a different rim point');
+        }
+        this.viewer.requestRender();
+        return true;
+      }
+
       if (!this.pending) {
         const snapPt = !altKey ? this.findNearPoint(rawR.x, rawR.y, 16) : null;
         this.pending = {
@@ -1852,60 +1957,31 @@ export class SketchController {
           this.setPointFixedToRaster(a.id, a.x, a.y);
         }
         let newLineId: number | undefined;
-        let newArcId: number | undefined;
         if (a.id !== b.id) {
           if (this.polyMode === 'arc' || this.polyMode === 'arc-free') {
-            const tangent = this.polyMode === 'arc';
-            // For a tangent arc, place the center opposite the previous arc's
-            // center (external tangency) so the solver starts from a good guess.
-            const lastArcId = tangent ? this.pending.lastArcId : undefined;
-            const prevArc =
-              lastArcId !== undefined
-                ? this.arcs.find((x) => x.id === lastArcId)
-                : undefined;
-            const prevCenter = prevArc
-              ? this.points.find((p) => p.id === prevArc.center)
-              : undefined;
-            let cPt: SavedSketchPoint;
-            if (prevArc && prevCenter) {
-              const vx = a.x - prevCenter.x;
-              const vy = a.y - prevCenter.y;
-              const vl = Math.hypot(vx, vy) || 1;
-              const guessR = Math.max(1, Math.hypot(b.x - a.x, b.y - a.y) / 2);
-              cPt = this.getOrCreatePoint(a.x + (vx / vl) * guessR, a.y + (vy / vl) * guessR, true, true);
-            } else {
-              const mx = (a.x + b.x) / 2;
-              const my = (a.y + b.y) / 2;
-              cPt = this.getOrCreatePoint(
-                mx - (b.y - a.y) * 0.3,
-                my + (b.x - a.x) * 0.3,
-                true,
-                true,
-              );
-            }
-            const rad = Math.hypot(a.x - cPt.x, a.y - cPt.y) || Math.hypot(b.x - a.x, b.y - a.y) / 2;
-            const arcId = this.nextArcId();
-            this.arcs.push({
-              id: arcId,
-              center: cPt.id,
-              radius: rad,
-              start: Math.atan2(a.y - cPt.y, a.x - cPt.x),
-              end: Math.atan2(b.y - cPt.y, b.x - cPt.x),
-              startPt: a.id,
-              endPt: b.id,
-              construction: this.constructionMode,
-            });
-            this.constraints.push({ PointOnArc: [a.id, arcId] });
-            this.constraints.push({ PointOnArc: [b.id, arcId] });
-            newArcId = arcId;
-            if (tangent) {
-              // Tangent continuation to the previous segment (smooth joint).
-              if (this.pending.lastLineId !== undefined) {
-                this.constraints.push({ TangentLineArc: [this.pending.lastLineId, arcId] });
-              } else if (this.pending.lastArcId !== undefined) {
-                this.constraints.push({ TangentArcArc: [this.pending.lastArcId, arcId] });
-              }
-            }
+            // 3-point arc: the joint is one endpoint; this click fixes the
+            // second endpoint, and the next click defines the rim point.
+            this.polyArcPending = {
+              aId: a.id,
+              ax: a.x,
+              ay: a.y,
+              bId: b.id,
+              bx: b.x,
+              by: b.y,
+              startId: this.pending.startPointId ?? a.id,
+              prevLineId: this.pending.lastLineId,
+              prevArcId: this.pending.lastArcId,
+              tangent: this.polyMode === 'arc',
+            };
+            this.pending = null;
+            this.onStatus(
+              this.polyMode === 'arc'
+                ? 'Tangent arc: click a point on the rim'
+                : 'Arc: click a point on the rim',
+            );
+            this.render();
+            this.viewer.requestRender();
+            return true;
           } else {
             const lineId = this.nextLineId();
             this.lines.push({
@@ -1944,7 +2020,7 @@ export class SketchController {
             pointId: b.id,
             startPointId: startId,
             lastLineId: newLineId,
-            lastArcId: newArcId,
+            lastArcId: undefined,
           };
           this.onStatus(t(this.locale, 'sketch.finishChain'));
         }
@@ -2343,6 +2419,17 @@ export class SketchController {
         ctx.fillText(badgeText, this.lastMouse.x + 21, this.lastMouse.y + 29);
         ctx.restore();
       }
+      if (this.tool !== 'select') {
+        const toolText = this.toolLabel();
+        ctx.save();
+        ctx.font = 'bold 11px Arial, sans-serif';
+        const bw = ctx.measureText(toolText).width + 14;
+        ctx.fillStyle = 'rgba(15, 23, 42, 0.88)';
+        ctx.fillRect(this.lastMouse.x + 14, this.lastMouse.y - 32, bw, 20);
+        ctx.fillStyle = '#7dd3fc';
+        ctx.fillText(toolText, this.lastMouse.x + 21, this.lastMouse.y - 18);
+        ctx.restore();
+      }
       const rect = ctx.canvas.getBoundingClientRect();
       const curRaster = this.viewer.clientToRaster(
         rect.left + this.lastMouse.x,
@@ -2548,6 +2635,27 @@ export class SketchController {
                 targetScreen.y - 10,
               );
             }
+          }
+          ctx.restore();
+        } else if (this.polyArcPending) {
+          const pa = this.polyArcPending;
+          const circ = circumcircleArc(pa.ax, pa.ay, pa.bx, pa.by, targetX, targetY);
+          ctx.save();
+          ctx.strokeStyle = accent;
+          ctx.fillStyle = accent;
+          ctx.setLineDash([5, 4]);
+          if (circ) {
+            ctx.save();
+            ctx.transform(m[0], m[1], m[2], m[3], m[4], m[5]);
+            ctx.beginPath();
+            ctx.arc(circ.cx, circ.cy, circ.radius, circ.startAngle, circ.endAngle);
+            ctx.restore();
+            ctx.stroke();
+            ctx.fillText(
+              `R ${(circ.radius * scaleMm).toFixed(1)} ${unitLabel}`,
+              targetScreen.x + 10,
+              targetScreen.y - 10,
+            );
           }
           ctx.restore();
         }
@@ -3503,8 +3611,8 @@ export class SketchController {
       <div class="sketch-toolbar-box" role="group" aria-label="Selection & Coordinate System Toolbar">
         <div class="sketch-toolbar-title">1 · Selection & Coordinate System (0,0)</div>
         <div class="cal-actions">
-          <button id="sketch-tool-select" class="btn ${this.tool === 'select' ? 'btn-primary' : ''}" type="button" title="${t(locale, 'sketch.tool.select')}">↖ Select / Move (V)</button>
-          <button id="sketch-tool-origin" class="btn ${this.tool === 'origin' ? 'btn-primary' : ''}" type="button" title="Move (0,0) Coordinate System Origin">🎯 Set (0,0) [${Math.round(orig.x)}, ${Math.round(orig.y)}]</button>
+          <button id="sketch-tool-select" class="btn ${this.tool === 'select' ? 'btn-tool-active' : ''}" type="button" title="${t(locale, 'sketch.tool.select')}">↖ Select / Move (V)</button>
+          <button id="sketch-tool-origin" class="btn ${this.tool === 'origin' ? 'btn-tool-active' : ''}" type="button" title="Move (0,0) Coordinate System Origin">🎯 Set (0,0) [${Math.round(orig.x)}, ${Math.round(orig.y)}]</button>
           <button id="sketch-origin-reset" class="btn" type="button" title="Reset (0,0) to bottom-left corner of raster">↺ (0,0) Bottom-Left</button>
           <button id="sketch-undo" class="btn" type="button" title="${t(locale, 'sketch.undo')}">↶</button>
           <button id="sketch-redo" class="btn" type="button" title="${t(locale, 'sketch.redo')}">↷</button>
@@ -3523,18 +3631,18 @@ export class SketchController {
       <div class="sketch-toolbar-box" role="group" aria-label="Geometry Tools">
         <div class="sketch-toolbar-title">2 · Draw & Modify Geometry</div>
         <div class="cal-actions">
-          <button id="sketch-tool-polyline" class="btn ${this.tool === 'polyline' ? 'btn-primary' : ''}" type="button" title="${t(locale, 'sketch.tool.polyline')}">Polyline (P)</button>
-          <button id="sketch-tool-line" class="btn ${this.tool === 'line' ? 'btn-primary' : ''}" type="button" title="${t(locale, 'sketch.tool.line')}">╱ Line (L)</button>
-          <button id="sketch-tool-rect" class="btn ${this.tool === 'rect' ? 'btn-primary' : ''}" type="button" title="${t(locale, 'sketch.tool.rect')}">▭ Rect (R)</button>
-          <button id="sketch-tool-center-rect" class="btn ${this.tool === 'centerRect' ? 'btn-primary' : ''}" type="button" title="${t(locale, 'sketch.tool.centerRect')}">⊡ C-Rect</button>
-          <button id="sketch-tool-slot" class="btn ${this.tool === 'slot' ? 'btn-primary' : ''}" type="button" title="${t(locale, 'sketch.tool.slot')}">⬭ Slot (S)</button>
-          <button id="sketch-tool-circle" class="btn ${this.tool === 'circle' ? 'btn-primary' : ''}" type="button" title="${t(locale, 'sketch.tool.circle')}">◯ Circle (C)</button>
-          <button id="sketch-tool-arc" class="btn ${this.tool === 'arc' ? 'btn-primary' : ''}" type="button" title="Center-Start-End Arc (A)">◜ Arc C-S-E (A)</button>
-          <button id="sketch-tool-arc3pt" class="btn ${this.tool === 'arc3pt' ? 'btn-primary' : ''}" type="button" title="3-Point Rim Arc (Shift+A or M)">⌒ 3-Pt Arc</button>
-          <button id="sketch-tool-polygon" class="btn ${this.tool === 'polygon' ? 'btn-primary' : ''}" type="button" title="${t(locale, 'sketch.tool.polygon')}">⬡ Poly (G)</button>
-          <button id="sketch-tool-fillet" class="btn ${this.tool === 'fillet' ? 'btn-primary' : ''}" type="button" title="${t(locale, 'sketch.tool.fillet')}">╭ Fillet (F)</button>
-          <button id="sketch-tool-trim" class="btn ${this.tool === 'trim' ? 'btn-primary' : ''}" type="button" title="${t(locale, 'sketch.tool.trim')}">✂ Trim (T)</button>
-          <button id="sketch-tool-point" class="btn ${this.tool === 'point' ? 'btn-primary' : ''}" type="button" title="${t(locale, 'sketch.tool.point')}">• Point (O)</button>
+          <button id="sketch-tool-polyline" class="btn ${this.tool === 'polyline' ? 'btn-tool-active' : ''}" type="button" title="${t(locale, 'sketch.tool.polyline')}">Polyline (P)</button>
+          <button id="sketch-tool-line" class="btn ${this.tool === 'line' ? 'btn-tool-active' : ''}" type="button" title="${t(locale, 'sketch.tool.line')}">╱ Line (L)</button>
+          <button id="sketch-tool-rect" class="btn ${this.tool === 'rect' ? 'btn-tool-active' : ''}" type="button" title="${t(locale, 'sketch.tool.rect')}">▭ Rect (R)</button>
+          <button id="sketch-tool-center-rect" class="btn ${this.tool === 'centerRect' ? 'btn-tool-active' : ''}" type="button" title="${t(locale, 'sketch.tool.centerRect')}">⊡ C-Rect</button>
+          <button id="sketch-tool-slot" class="btn ${this.tool === 'slot' ? 'btn-tool-active' : ''}" type="button" title="${t(locale, 'sketch.tool.slot')}">⬭ Slot (S)</button>
+          <button id="sketch-tool-circle" class="btn ${this.tool === 'circle' ? 'btn-tool-active' : ''}" type="button" title="${t(locale, 'sketch.tool.circle')}">◯ Circle (C)</button>
+          <button id="sketch-tool-arc" class="btn ${this.tool === 'arc' ? 'btn-tool-active' : ''}" type="button" title="Center-Start-End Arc (A)">◜ Arc C-S-E (A)</button>
+          <button id="sketch-tool-arc3pt" class="btn ${this.tool === 'arc3pt' ? 'btn-tool-active' : ''}" type="button" title="3-Point Rim Arc (Shift+A or M)">⌒ 3-Pt Arc</button>
+          <button id="sketch-tool-polygon" class="btn ${this.tool === 'polygon' ? 'btn-tool-active' : ''}" type="button" title="${t(locale, 'sketch.tool.polygon')}">⬡ Poly (G)</button>
+          <button id="sketch-tool-fillet" class="btn ${this.tool === 'fillet' ? 'btn-tool-active' : ''}" type="button" title="${t(locale, 'sketch.tool.fillet')}">╭ Fillet (F)</button>
+          <button id="sketch-tool-trim" class="btn ${this.tool === 'trim' ? 'btn-tool-active' : ''}" type="button" title="${t(locale, 'sketch.tool.trim')}">✂ Trim (T)</button>
+          <button id="sketch-tool-point" class="btn ${this.tool === 'point' ? 'btn-tool-active' : ''}" type="button" title="${t(locale, 'sketch.tool.point')}">• Point (O)</button>
         </div>
         ${
           this.pending || this.arcStartPending || this.arc3PtPending
