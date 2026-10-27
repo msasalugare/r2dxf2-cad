@@ -1139,11 +1139,9 @@ export class SketchController {
         return true;
       }
       if (this.dragState.kind === 'origin') {
-        const alt = this.lastMouse?.altKey ?? false;
-        const snapped =
-          !alt && this.rasterSnapEnabled && this.grayCache
-            ? this.snapRasterPoint(r, false)
-            : { x: r.x, y: r.y };
+        // Snap the origin to sketch points (and lines/arcs/raster/grid) while
+        // dragging, matching the click-path snap behaviour.
+        const snapped = this.snapInputCoord(r.x, r.y, this.lastMouse?.altKey ?? false);
         this.viewer.setOrigin(snapped.x, snapped.y);
         return true;
       }
