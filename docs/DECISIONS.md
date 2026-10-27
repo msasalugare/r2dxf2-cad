@@ -4,6 +4,11 @@ This file records library/tooling/design choices and why, per the project rule:
 check current versions before use and justify every dependency. Versions were
 resolved from the live registries on 2026-10-24.
 
+> **Note (2026-10-26)**: the app is now **server-only** — the in-browser
+> `rf-wasm` core and the browser-side PDF.js renderer were removed. The "WASM
+> bridge" section below is retained as historical record; see the "Native
+> backend" section for the current architecture.
+
 ## Language & conventions
 
 - **Code, comments, docs**: English.
@@ -15,11 +20,10 @@ resolved from the live registries on 2026-10-24.
 
 ## Rust workspace
 
-- **Cargo workspace** with `members = ["crates/rf-core", "crates/rf-wasm", "crates/rf-cli"]` and
-  `default-members = ["crates/rf-core", "crates/rf-cli"]`. Rationale: native `cargo build/test`
-  must not require the `wasm32-unknown-unknown` target or wasm-bindgen; the wasm
-  crate is built explicitly for its target only. `rf-cli` is a native JSON-in/JSON-out
-  bridge used by the FastAPI backend.
+- **Cargo workspace** with `members = ["crates/rf-core", "crates/rf-cli"]` and
+  `default-members = ["crates/rf-core", "crates/rf-cli"]`. Rationale: `rf-cli` is a native
+  JSON-in/JSON-out bridge used by the FastAPI backend; the `rf-wasm` crate was removed
+  when the app became server-only (2026-10-26).
 - **edition 2021** (MSRV conservative; the pinned toolchain is current stable
   1.94).
 - **Dependencies** (workspace, added lazily):
@@ -175,7 +179,7 @@ resolved from the live registries on 2026-10-24.
 - **Tiled `f32` ridge detection & spatial hash**: `detect_ridges_roi` processes `512 × 512` tiles with a halo of `background_radius + 3·σ_max + 2`, using `f32` intermediate buffers per tile and `f64` sub-pixel quadratic interpolation, indexed by a `16 px` spatial hash (`RidgeIndex`) for fast nearest-centerline queries.
 - **Robust IRLS KKT fitter**: Uncovered samples (outside `capture_radius_px` or with mask weight `≤ 1e-3`) are discarded rather than penalized (`T10`); inlier samples are weighted by `√w_mask · w_cauchy(d_n / c)` alongside a tangent alignment residual (`T4`). Construction geometry (`construction: true`) is excluded from fitting by default.
 
-## WASM bridge
+## WASM bridge (historical — removed 2026-10-26)
 
 - **Boundary**: all values cross as JSON strings (or `Uint8Array` for gray
   buffers), so `rf-core` stays the single source of truth for the numerics and
@@ -197,10 +201,9 @@ resolved from the live registries on 2026-10-24.
   `detect-ridges`, `snap-ridge`, `export-dxf/svg`, `report-json/csv`), plus
   PyMuPDF/OpenCV/NumPy for PDF rendering and raster preprocessing. The Rust core
   stays the single source of truth for the numerics.
-- **Hybrid client** (`web/src/backend.ts`): `checkNativeBackend()` probes
-  `/api/health`; when reachable the app uses `/api/*`, otherwise it falls back
-  to the in-browser WASM bindings. This keeps the app fully offline-capable
-  (D7) and lets a static `dist/` build work with no server.
+- **Server-only client** (`web/src/backend.ts`): every compute operation uses
+  `/api/*`; the app requires an authenticated backend (sign-in required). The
+  offline/static-hosting path and the in-browser WASM fallback were removed.
 - **Session storage**: uploaded rasters and derived artifacts (`gray.bin`,
   `ridges.json`, `meta.json`) are written under `tempfile.gettempdir()` (the
   container mounts `/tmp` as tmpfs), keyed by a per-upload `uuid`; nothing is

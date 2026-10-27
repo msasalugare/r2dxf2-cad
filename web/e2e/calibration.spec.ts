@@ -1,4 +1,9 @@
 import { expect, test } from '@playwright/test';
+import { login } from './helpers';
+
+test.beforeEach(async ({ page }) => {
+  await login(page);
+});
 
 test('calibration panel opens and reports the empty state', async ({ page }) => {
   await page.goto('/');

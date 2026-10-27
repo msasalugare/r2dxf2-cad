@@ -1,5 +1,10 @@
 import { expect, test } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
+import { login } from './helpers';
+
+test.beforeEach(async ({ page }) => {
+  await login(page);
+});
 
 test('start screen has no serious axe violations', async ({ page }) => {
   await page.goto('/');

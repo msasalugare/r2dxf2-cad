@@ -1,4 +1,9 @@
 import { expect, test } from '@playwright/test';
+import { login } from './helpers';
+
+test.beforeEach(async ({ page }) => {
+  await login(page);
+});
 
 test('paints a mask stroke via drag', async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 720 });

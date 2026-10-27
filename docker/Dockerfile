@@ -1,26 +1,14 @@
 # syntax=docker/dockerfile:1
-# RasterFit combined Native Rust (`rf-cli`) + Python (`FastAPI`) + Web (`Vite` + `rf-wasm`) build.
+# RasterFit Native Rust (`rf-cli`) + Python (`FastAPI`) + Web (`Vite`) build.
+# All compute runs server-side; the browser bundle has no WASM core.
 
-# ---- rust build (native `rf-cli` + `rf-wasm` package) --------------------
+# ---- rust build (native `rf-cli`) ---------------------------------------
 FROM rust:1.94.0 AS rust-builder
 WORKDIR /app
 
-RUN rustup target add wasm32-unknown-unknown
-
 COPY Cargo.toml Cargo.lock ./
-RUN set -eux; \
-    LOCKED=$(awk '/^name = "wasm-bindgen"$/{getline; if ($0 ~ /version = /) {gsub(/"/,"",$3); print $3; exit}}' Cargo.lock); \
-    echo "wasm-bindgen locked: $LOCKED"; \
-    cargo install wasm-bindgen-cli --version "$LOCKED"; \
-    INSTALLED=$(wasm-bindgen --version | awk '{print $2}'); \
-    [ "$INSTALLED" = "$LOCKED" ] || { echo "wasm-bindgen CLI mismatch: $INSTALLED != $LOCKED"; exit 1; }
-
 COPY crates/ ./crates/
 RUN cargo build --release -p rf-cli --locked
-
-ENV RUSTFLAGS="-C target-feature=+simd128"
-RUN cargo build --release --target wasm32-unknown-unknown -p rf-wasm --locked && \
-    wasm-bindgen target/wasm32-unknown-unknown/release/rf_wasm.wasm --out-dir wasm-pkg --target web
 
 # ---- web build ------------------------------------------------------------
 FROM node:24-alpine AS web
@@ -29,7 +17,6 @@ WORKDIR /app
 COPY web/package.json web/package-lock.json ./
 RUN npm ci
 
-COPY --from=rust-builder /app/wasm-pkg ./public/wasm/
 COPY web/ ./
 ARG VITE_BASE=/
 ENV VITE_BASE=${VITE_BASE}

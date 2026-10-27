@@ -11,8 +11,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "tsc --noEmit",
-    "e2e": "playwright test",
-    "wasm:build": "bash scripts/build-wasm.sh"
+    "e2e": "playwright test"
   },
   "devDependencies": {
     "@axe-core/playwright": "^4.14.0",
@@ -23,7 +22,6 @@
     "vitest": "5.0.5"
   },
   "dependencies": {
-    "fflate": "^0.8.3",
-    "pdfjs-dist": "6.4.299"
+    "fflate": "^0.8.3"
   }
 }

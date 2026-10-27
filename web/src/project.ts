@@ -56,6 +56,41 @@ export interface SavedSketchData {
   reference_constraints?: number[];
 }
 
+/**
+ * Transform a raster-space sketch (pixels, y-down) to CAD world space
+ * (millimetres, y-up) for DXF/SVG export. Applies the calibration scale, the
+ * y-up flip, the origin offset, and mirrors arc angles.
+ *
+ * Circles/arcs use `sx` for the radius (correct for isotropic scale; an
+ * anisotropic scale would turn them into ellipses, which DXF cannot express).
+ */
+export function sketchToWorld(
+  sketch: SavedSketchData,
+  scale: { sx: number; sy: number },
+  origin: { x: number; y: number },
+): SavedSketchData {
+  const sx = scale.sx > 0 ? scale.sx : 1;
+  const sy = scale.sy > 0 ? scale.sy : 1;
+  const tau = Math.PI * 2;
+  const norm = (a: number): number => ((a % tau) + tau) % tau;
+  const toWorld = (rx: number, ry: number): { x: number; y: number } => ({
+    x: (rx - origin.x) * sx,
+    y: (origin.y - ry) * sy,
+  });
+  const points = sketch.points.map((p) => {
+    const w = toWorld(p.x, p.y);
+    return { ...p, x: w.x, y: w.y };
+  });
+  const circles = sketch.circles.map((c) => ({ ...c, radius: c.radius * sx }));
+  const arcs = sketch.arcs.map((a) => {
+    const sweep = norm(a.end - a.start);
+    // The y-up flip negates the angle; DXF/SVG arcs sweep CCW in y-up space.
+    const start = norm(-a.end);
+    return { ...a, radius: a.radius * sx, start, end: start + sweep };
+  });
+  return { ...sketch, points, circles, arcs };
+}
+
 export interface SavedMaskStroke {
   mode: 'include' | 'exclude';
   kind?: 'brush' | 'polygon' | 'rect';

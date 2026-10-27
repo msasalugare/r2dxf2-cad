@@ -25,7 +25,6 @@ if [ "${FULL_DOCKER_BUILD:-0}" = "1" ]; then
   docker build -f docker/Dockerfile -t "${IMAGE}" .
 else
   cargo build --release -p rf-cli
-  npm --prefix web run wasm:build
   npm --prefix web run build
   TMP_CTX="$(mktemp -d)"
   trap 'rm -rf "${TMP_CTX}"' EXIT

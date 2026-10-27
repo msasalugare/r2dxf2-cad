@@ -1,5 +1,6 @@
 // Calibration solvers, mirrored from `rf-core::calibration` so the browser can
-// solve without the WASM core yet (the wasm toolchain is deferred to M3).
+// solve calibration locally (a cheap closed-form least-squares that never needed
+// the server-side compute).
 //
 // Numerics follow the Rust implementation exactly (IEEE 754 f64); the shared
 // acceptance vectors in `calibration.test.ts` and the Rust `calibration` tests

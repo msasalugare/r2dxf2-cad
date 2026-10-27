@@ -170,7 +170,12 @@ def init_db() -> None:
 
 
 def get_db():
-    conn = sqlite3.connect(str(_db_path()), timeout=10)
+    # FastAPI runs sync dependencies/endpoints in a threadpool, so a single
+    # request can create, use, and close this connection on different worker
+    # threads. `check_same_thread=False` removes SQLite's same-thread guard;
+    # it is safe here because each request gets its own connection and uses it
+    # strictly sequentially (never concurrently).
+    conn = sqlite3.connect(str(_db_path()), timeout=10, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     try:
@@ -261,24 +266,25 @@ app.add_middleware(
 app.add_middleware(GZipMiddleware, minimum_size=500)
 
 # Security headers previously served by the nginx runtime; preserved here so the
-# FastAPI backend keeps the same posture (CSP allows 'self' + wasm eval only).
+# FastAPI backend keeps the same posture. The app is server-only: no WASM, so
+# `script-src` needs no 'wasm-unsafe-eval' allowance.
 SECURITY_HEADERS = {
     "X-Content-Type-Options": "nosniff",
     "Referrer-Policy": "no-referrer",
     "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
     "Content-Security-Policy": (
-        "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; "
+        "default-src 'self'; script-src 'self'; "
         "worker-src 'self' blob:; img-src 'self' blob: data:; "
         "style-src 'self'; connect-src 'self'; base-uri 'none'; "
         "frame-ancestors 'none'"
     ),
 }
 
-# Fingerprinted build assets and the vendored wasm/pdfjs payloads are immutable.
-_IMMUTABLE_PREFIXES = ("/assets/", "/wasm/", "/pdfjs/")
+# Fingerprinted build assets are immutable.
+_IMMUTABLE_PREFIXES = ("/assets/",)
 _IMMUTABLE_SUFFIXES = (
-    ".wasm", ".mjs", ".js", ".css", ".svg", ".woff2", ".png",
-    ".jpg", ".jpeg", ".webp", ".json", ".ttf", ".icc", ".bcmap",
+    ".mjs", ".js", ".css", ".svg", ".woff2", ".png",
+    ".jpg", ".jpeg", ".webp", ".json", ".ttf",
 )
 
 
@@ -682,6 +688,22 @@ def api_export_svg(sketch: Dict[str, Any], user: sqlite3.Row = Depends(current_u
         content=out,
         media_type="image/svg+xml",
         headers={"Content-Disposition": 'attachment; filename="sketch.svg"'},
+    )
+
+
+@app.post("/api/report/json")
+def api_report_json(result: Dict[str, Any], user: sqlite3.Row = Depends(current_user)) -> Response:
+    out = run_rf_cli("report-json", result)
+    return Response(content=out, media_type="application/json")
+
+
+@app.post("/api/report/csv")
+def api_report_csv(result: Dict[str, Any], user: sqlite3.Row = Depends(current_user)) -> Response:
+    out = run_rf_cli("report-csv", result)
+    return Response(
+        content=out,
+        media_type="text/csv",
+        headers={"Content-Disposition": 'attachment; filename="fit-report.csv"'},
     )
 
 

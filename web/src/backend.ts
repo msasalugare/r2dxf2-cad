@@ -1,8 +1,8 @@
-// Native Rust + Python FastAPI backend client (`/api/*`) with automatic fallback
-// to the in-browser WASM module when offline.
+// Native Rust + Python FastAPI backend client (`/api/*`). The web app is
+// server-only: every compute operation (solve/fit/ridge/export/report) goes
+// through the backend; there is no in-browser WASM fallback.
 
 import type { SavedSketchData } from './project';
-import { loadWasm } from './wasm';
 
 export interface SolveResponse {
   converged: boolean;
@@ -83,29 +83,51 @@ export async function checkNativeBackend(): Promise<boolean> {
       }
     }
   } catch {
-    // Fallback to WASM when Vite preview or offline mode is active
+    // Backend unreachable: server-only app cannot run offline.
   }
   nativeBackendAvailable = false;
   return false;
 }
 
-export async function solveSketch(sketch: SavedSketchData, preferLocal = false): Promise<SolveResponse> {
-  if (!preferLocal && (await checkNativeBackend())) {
-    try {
-      const res = await fetch('/api/solve', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(sketch),
-      });
-      if (res.ok) {
-        return (await res.json()) as SolveResponse;
-      }
-    } catch {
-      // Fall through to WASM
-    }
-  }
-  const wasm = await loadWasm();
-  return JSON.parse(wasm.solve_constraints(JSON.stringify(sketch))) as SolveResponse;
+export async function solveSketch(sketch: SavedSketchData, _preferLocal = false): Promise<SolveResponse> {
+  const res = await fetch('/api/solve', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(sketch),
+  });
+  if (!res.ok) throw await readError(res, 'Solve failed');
+  return (await res.json()) as SolveResponse;
+}
+
+/** Run a constrained fit against the server's cached ridges for `raster_id`. */
+export async function fitSketch(payload: Record<string, unknown>): Promise<string> {
+  const res = await fetch('/api/fit', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw await readError(res, 'Fit failed');
+  return await res.text();
+}
+
+export async function reportJson(result: Record<string, unknown>): Promise<string> {
+  const res = await fetch('/api/report/json', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(result),
+  });
+  if (!res.ok) throw await readError(res, 'Report failed');
+  return await res.text();
+}
+
+export async function reportCsv(result: Record<string, unknown>): Promise<string> {
+  const res = await fetch('/api/report/csv', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(result),
+  });
+  if (!res.ok) throw await readError(res, 'Report failed');
+  return await res.text();
 }
 
 export async function uploadRasterToBackend(
@@ -133,42 +155,46 @@ export async function uploadRasterToBackend(
   }
 }
 
-export async function exportSketchDxf(sketch: SavedSketchData): Promise<string> {
-  if (await checkNativeBackend()) {
-    try {
-      const res = await fetch('/api/export/dxf', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(sketch),
-      });
-      if (res.ok) {
-        return await res.text();
-      }
-    } catch {
-      // Fall through
-    }
+/** Render another page of a server-hosted PDF session. */
+export async function renderBackendPdfPage(
+  rasterId: string,
+  page: number,
+  dpi = 200,
+): Promise<NativeRasterSession | null> {
+  if (!(await checkNativeBackend())) return null;
+  try {
+    const res = await fetch(`/api/raster/${rasterId}/pdf-page`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ page, dpi }),
+    });
+    if (!res.ok) return null;
+    const session = (await res.json()) as NativeRasterSession;
+    activeRasterSession = session;
+    return session;
+  } catch {
+    return null;
   }
-  const wasm = await loadWasm();
-  return wasm.export_dxf(JSON.stringify(sketch));
+}
+
+export async function exportSketchDxf(sketch: SavedSketchData): Promise<string> {
+  const res = await fetch('/api/export/dxf', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(sketch),
+  });
+  if (!res.ok) throw await readError(res, 'DXF export failed');
+  return await res.text();
 }
 
 export async function exportSketchSvg(sketch: SavedSketchData): Promise<string> {
-  if (await checkNativeBackend()) {
-    try {
-      const res = await fetch('/api/export/svg', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(sketch),
-      });
-      if (res.ok) {
-        return await res.text();
-      }
-    } catch {
-      // Fall through
-    }
-  }
-  const wasm = await loadWasm();
-  return wasm.export_svg(JSON.stringify(sketch));
+  const res = await fetch('/api/export/svg', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(sketch),
+  });
+  if (!res.ok) throw await readError(res, 'SVG export failed');
+  return await res.text();
 }
 
 // --- Auth & user management (native backend) ------------------------------

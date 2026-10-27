@@ -2,7 +2,7 @@
 //
 // `File.type` is empty or wrong often enough (drag-and-drop, OS-provided
 // blobs) that we sniff the magic bytes instead. RasterFit supports the raster
-// formats the viewer can display (PNG/JPEG/WebP) plus PDF (via PDF.js).
+// formats the viewer can display (PNG/JPEG/WebP) plus PDF (server-rendered).
 
 export type SourceKind = 'pdf' | 'image' | 'unsupported';
 

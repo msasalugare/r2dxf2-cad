@@ -13,14 +13,16 @@
 // - Per-entity SVD DoF coloring (FreeCAD green for locked DoFs, blue dashed for
 //   construction, cyan for selected, red for conflicting), on-canvas constraint
 //   glyphs, and on-canvas dimension leaders with inline value editing.
-// - Native Rust+Python backend (`/api/solve`, `/api/fit`, `/api/export/*`) with
-//   automatic WASM fallback for 60 FPS drag solving and offline operation.
+// - Native Rust+Python backend (`/api/solve`, `/api/fit`, `/api/export/*`,
+//   `/api/report/*`) — all compute runs server-side; no WASM fallback.
 
 import {
-  checkNativeBackend,
   exportSketchDxf,
   exportSketchSvg,
+  fitSketch,
   getActiveRasterSession,
+  reportCsv,
+  reportJson,
   solveSketch,
   type FitResponse,
   type SolveResponse,
@@ -33,8 +35,8 @@ import type {
   SavedSketchLine,
   SavedSketchPoint,
 } from './project';
+import { sketchToWorld } from './project';
 import type { Affine, RasterViewer } from './viewer';
-import { loadWasm } from './wasm';
 
 export type SketchTool =
   | 'polyline'
@@ -84,7 +86,6 @@ export class SketchController {
   private activeConstraintTool: string | null = null;
   private editingConstraintIdx: number | null = null;
   private dimBadgeRects: { cIdx: number; x: number; y: number; w: number; h: number }[] = [];
-  private wasmMod: Awaited<ReturnType<typeof loadWasm>> | null = null;
   private polyMode: PolylineSubMode = 'line';
   private polygonSides = 6;
   private constructionMode = false;
@@ -153,7 +154,6 @@ export class SketchController {
     private panel: HTMLElement,
     private locale: Locale,
     private onStatus: (msg: string, isError?: boolean) => void,
-    private getGray: () => Promise<{ data: Uint8Array; width: number; height: number } | null>,
     private getMaskStrokes: () => {
       mode: 'include' | 'exclude';
       kind?: 'brush' | 'polygon' | 'rect';
@@ -162,13 +162,7 @@ export class SketchController {
     }[],
     private onDofChange?: (dof: number, status: 'ok' | 'under' | 'conflict') => void,
     private onChange?: () => void,
-  ) {
-    void loadWasm()
-      .then((w) => {
-        this.wasmMod = w;
-      })
-      .catch(() => {});
-  }
+  ) {}
 
   isActive(): boolean {
     return this.active;
@@ -2814,15 +2808,6 @@ export class SketchController {
     }
     try {
       const sketch = this.buildSketch();
-      if (this.wasmMod) {
-        const result = JSON.parse(
-          this.wasmMod.solve_constraints(JSON.stringify(sketch)),
-        ) as SolveResponse;
-        this.applyParams(result.params);
-        this.lastSolve = result;
-        this.notifyDof();
-        return;
-      }
       const result = await solveSketch(sketch, true);
       this.applyParams(result.params);
       this.lastSolve = result;
@@ -2866,8 +2851,8 @@ export class SketchController {
       return;
     }
     try {
-      const gray = await this.getGray();
-      if (!gray) {
+      const session = getActiveRasterSession();
+      if (!session || session.ridges.length === 0) {
         this.onStatus(t(this.locale, 'sketch.none'), true);
         return;
       }
@@ -2880,21 +2865,6 @@ export class SketchController {
         this.preFitSnapshot = null;
         this.pushUndo();
       }
-
-      const wasm = await loadWasm();
-      const ridgeParams = { scales: [1.0, 1.5, 2.5], background_radius: 24, min_strength: 5.0 };
-
-      // Restrict ridge detection to the sketch bounding box + 200 px margin (Prompt.txt §2).
-      const roi = this.computeSketchRoi(gray.width, gray.height, 200);
-      const ridges = JSON.parse(
-        wasm.detect_ridges_roi(
-          gray.data,
-          gray.width,
-          gray.height,
-          JSON.stringify(roi),
-          JSON.stringify(ridgeParams),
-        ),
-      ) as { x: number; y: number; direction: number; strength: number; scale: number }[];
 
       const fitterParams = {
         max_iterations: 40,
@@ -2911,66 +2881,31 @@ export class SketchController {
         tangent_weight: 0.1,
       };
 
-      const sketchObj = this.buildSketch();
-      const sketchJson = JSON.stringify(sketchObj);
       const maskStrokes = this.getMaskStrokes();
-      let resultJson = '';
-
-      // Try native backend `/api/fit` first if online
-      if ((await checkNativeBackend()) && maskStrokes.length === 0) {
-        try {
-          const resp = await fetch('/api/fit', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              sketch: sketchObj,
-              centerlines: ridges,
-              initial: [0, 0, 0],
-              params: fitterParams,
-              raster_id: getActiveRasterSession()?.raster_id,
-            }),
-          });
-          if (resp.ok) {
-            resultJson = await resp.text();
-          }
-        } catch {
-          // Fall back to WASM
-        }
+      const payload: Record<string, unknown> = {
+        sketch: this.buildSketch(),
+        // Server-side ridges are in the same pixel frame as the displayed
+        // raster (the server is the single source of truth), so they match
+        // the sketch coordinates directly.
+        centerlines: session.ridges,
+        initial: [0, 0, 0],
+        params: fitterParams,
+      };
+      if (maskStrokes.length > 0) {
+        payload.mask_strokes = maskStrokes.map((s) => ({
+          mode: s.mode === 'include' ? 'Include' : 'Exclude',
+          kind: s.kind === 'rect' ? 'Rect' : s.kind === 'polygon' ? 'Polygon' : 'Brush',
+          radius: s.radius ?? 6.0,
+          points: s.points,
+        }));
+        payload.mask_params = {
+          enabled: true,
+          base_all: !maskStrokes.some((s) => s.mode === 'include'),
+          feather: 3.0,
+        };
       }
 
-      if (!resultJson) {
-        if (maskStrokes.length > 0) {
-          const rfStrokes = maskStrokes.map((s) => ({
-            mode: s.mode === 'include' ? 'Include' : 'Exclude',
-            kind: s.kind === 'rect' ? 'Rect' : s.kind === 'polygon' ? 'Polygon' : 'Brush',
-            radius: s.radius ?? 6.0,
-            points: s.points,
-          }));
-          const maskParams = {
-            enabled: true,
-            base_all: !maskStrokes.some((s) => s.mode === 'include'),
-            feather: 3.0,
-          };
-          resultJson = wasm.fit_sketch_masked(
-            sketchJson,
-            JSON.stringify(ridges),
-            JSON.stringify(rfStrokes),
-            JSON.stringify(maskParams),
-            gray.width,
-            gray.height,
-            JSON.stringify([0, 0, 0]),
-            JSON.stringify(fitterParams),
-          );
-        } else {
-          resultJson = wasm.fit_sketch(
-            sketchJson,
-            JSON.stringify(ridges),
-            JSON.stringify([0, 0, 0]),
-            JSON.stringify(fitterParams),
-          );
-        }
-      }
-
+      const resultJson = await fitSketch(payload);
       const result = JSON.parse(resultJson) as FitResponse;
       this.lastFitJson = resultJson;
       this.lastFit = result;
@@ -3026,74 +2961,41 @@ export class SketchController {
     this.viewer.requestRender();
   }
 
-  private computeSketchRoi(
-    width: number,
-    height: number,
-    margin: number,
-  ): { x0: number; y0: number; x1: number; y1: number } {
-    if (this.points.length === 0) {
-      return { x0: 0, y0: 0, x1: width, y1: height };
-    }
-    let minX = Infinity;
-    let minY = Infinity;
-    let maxX = -Infinity;
-    let maxY = -Infinity;
-    for (const p of this.points) {
-      minX = Math.min(minX, p.x);
-      minY = Math.min(minY, p.y);
-      maxX = Math.max(maxX, p.x);
-      maxY = Math.max(maxY, p.y);
-    }
-    for (const c of this.circles) {
-      const center = this.points.find((p) => p.id === c.center);
-      if (center) {
-        minX = Math.min(minX, center.x - c.radius);
-        minY = Math.min(minY, center.y - c.radius);
-        maxX = Math.max(maxX, center.x + c.radius);
-        maxY = Math.max(maxY, center.y + c.radius);
-      }
-    }
-    for (const a of this.arcs) {
-      const center = this.points.find((p) => p.id === a.center);
-      if (center) {
-        minX = Math.min(minX, center.x - a.radius);
-        minY = Math.min(minY, center.y - a.radius);
-        maxX = Math.max(maxX, center.x + a.radius);
-        maxY = Math.max(maxY, center.y + a.radius);
-      }
-    }
-    return {
-      x0: Math.max(0, Math.floor(minX - margin)),
-      y0: Math.max(0, Math.floor(minY - margin)),
-      x1: Math.min(width, Math.ceil(maxX + margin)),
-      y1: Math.min(height, Math.ceil(maxY + margin)),
-    };
-  }
-
   async exportDxf(): Promise<void> {
-    const dxf = await exportSketchDxf(this.buildSketch());
+    const dxf = await exportSketchDxf(this.buildWorldSketch());
     this.downloadText(dxf, 'sketch.dxf', 'application/dxf');
     document.documentElement.dataset.exported = 'dxf';
   }
 
   async exportSvg(): Promise<void> {
-    const svg = await exportSketchSvg(this.buildSketch());
+    const svg = await exportSketchSvg(this.buildWorldSketch());
     this.downloadText(svg, 'sketch.svg', 'image/svg+xml');
     document.documentElement.dataset.exported = 'svg';
   }
 
+  /**
+   * Build the sketch in CAD world coordinates (mm, y-up) for export. The editor
+   * stores geometry in raster pixels (y-down); the DXF/SVG exporters assume mm
+   * y-up, so this applies the calibration scale/flip/origin and arc mirroring.
+   */
+  private buildWorldSketch(): SavedSketchData {
+    return sketchToWorld(
+      this.buildSketch(),
+      this.viewer.getWorldScale(),
+      this.viewer.getOrigin(),
+    );
+  }
+
   async exportReportJson(): Promise<void> {
     if (!this.lastFitJson) return;
-    const wasm = await loadWasm();
-    const json = wasm.fit_report_json(this.lastFitJson);
+    const json = await reportJson(JSON.parse(this.lastFitJson) as Record<string, unknown>);
     this.downloadText(json, 'fit-report.json', 'application/json');
     document.documentElement.dataset.exported = 'json';
   }
 
   async exportReportCsv(): Promise<void> {
     if (!this.lastFitJson) return;
-    const wasm = await loadWasm();
-    const csv = wasm.fit_report_csv(this.lastFitJson);
+    const csv = await reportCsv(JSON.parse(this.lastFitJson) as Record<string, unknown>);
     this.downloadText(csv, 'fit-report.csv', 'text/csv');
     document.documentElement.dataset.exported = 'csv';
   }

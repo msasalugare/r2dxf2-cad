@@ -5,7 +5,9 @@
 > "Native backend"). The Docker criteria table and the "Docker status" summary
 > below predate that change. D2/D3 were **re-verified against the new image** on
 > 2026-10-26 (see "Re-verification" below); D5's "image < 30 MB" criterion no
-> longer applies because the native backend image is ~320 MB.
+> longer applies because the native backend image is ~320 MB. The app also became
+> **server-only** on 2026-10-26: the `rf-wasm` crate and the browser PDF.js
+> renderer were removed, so the wasm toolchain/target rows below are historical.
 > This file is retained as the original Phase 0 environment record.
 
 Captured: 2026-10-24, on the machine where the project is developed.

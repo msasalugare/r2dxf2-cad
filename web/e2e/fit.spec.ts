@@ -1,6 +1,11 @@
 import { expect, test } from '@playwright/test';
+import { login } from './helpers';
 
-test('fits a sketch to the raster via WASM ridge + fitter', async ({ page }) => {
+test.beforeEach(async ({ page }) => {
+  await login(page);
+});
+
+test('fits a sketch to the raster via backend ridge + fitter', async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 720 });
   await page.goto('/');
   await page.locator('#sample-btn').click();

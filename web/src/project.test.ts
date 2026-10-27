@@ -1,6 +1,53 @@
 import { describe, expect, it } from 'vitest';
 import { strToU8, zipSync } from 'fflate';
-import { hashBytes, unzipProject, zipProject, type ProjectData } from './project';
+import {
+  hashBytes,
+  sketchToWorld,
+  unzipProject,
+  zipProject,
+  type ProjectData,
+  type SavedSketchData,
+} from './project';
+
+describe('sketchToWorld', () => {
+  it('converts raster px to world mm with y-up flip and mirrors arcs', () => {
+    const sketch: SavedSketchData = {
+      points: [
+        { id: 1, x: 0, y: 100 }, // origin corner -> world (0, 0)
+        { id: 2, x: 400, y: 100 }, // 400 px along x -> 100 mm
+        { id: 3, x: 0, y: 20 }, // 80 px up (raster y-down) -> +20 mm
+      ],
+      lines: [{ id: 1, a: 1, b: 2, construction: false }],
+      circles: [{ id: 10, center: 1, radius: 40, construction: false }],
+      arcs: [
+        { id: 20, center: 1, radius: 40, start: 0, end: Math.PI / 2, construction: false },
+      ],
+      constraints: [],
+    };
+
+    const world = sketchToWorld(sketch, { sx: 0.25, sy: 0.25 }, { x: 0, y: 100 });
+
+    // Points: scale 0.25 mm/px + y-up flip around origin y=100.
+    expect(world.points[0]).toEqual({ id: 1, x: 0, y: 0 });
+    expect(world.points[1].x).toBeCloseTo(100);
+    expect(world.points[1].y).toBeCloseTo(0);
+    expect(world.points[2].x).toBeCloseTo(0);
+    expect(world.points[2].y).toBeCloseTo(20);
+
+    // Line length in mm: (100,0) - (0,0) = 100 mm (was 400 px).
+    expect(Math.hypot(world.points[1].x - world.points[0].x, world.points[1].y - world.points[0].y)).toBeCloseTo(100);
+
+    // Radius scaled from px to mm.
+    expect(world.circles[0].radius).toBeCloseTo(10);
+    expect(world.arcs[0].radius).toBeCloseTo(10);
+
+    // Arc angle mirroring: raster CCW 0..pi/2 (y-down) becomes world CCW
+    // 3pi/2..2pi (y-up) with the same sweep.
+    expect(world.arcs[0].start).toBeCloseTo((3 * Math.PI) / 2);
+    expect(world.arcs[0].end).toBeCloseTo(Math.PI * 2);
+    expect(world.arcs[0].end - world.arcs[0].start).toBeCloseTo(Math.PI / 2);
+  });
+});
 
 describe('project zip', () => {
   it('round-trips metadata and raster bytes', () => {

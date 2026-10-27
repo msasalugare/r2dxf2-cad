@@ -1,14 +1,12 @@
 # RasterFit
 
-Dockerized Rust/WASM web application for fitting a parametric 2D sketch (with
+Dockerized Rust/Python web application for fitting a parametric 2D sketch (with
 constraints) to a calibrated raster drawing, with an optional mask.
 
-No analytics, no telemetry. The core runs in the browser via a Rust→WASM
-module. An optional native backend (Python FastAPI + the same Rust core
-compiled as `rf-cli`) accelerates PDF/raster processing, adds FreeCAD Sketcher
-workflows, and provides optional self-hosted accounts (a superadmin defines
-users). The web app falls back to the in-browser WASM core automatically when
-`/api/*` is unreachable (offline, static hosting, or `vite preview`).
+No analytics, no telemetry. All computation (raster decoding, PDF rendering,
+ridge detection, constraint solving, fitting, and DXF/SVG/JSON/CSV export) runs
+on the FastAPI + native `rf-cli` backend — the browser is a thin client that
+displays the server-rendered raster and edits the sketch. Sign-in is required.
 
 > **Status**: v1 complete. PNG/JPEG/WebP + multi-page PDF import, tiled pyramid
 > pan/zoom viewer, IndexedDB autosave + `.rasterfit.zip` project archives,
@@ -25,48 +23,42 @@ docker compose up --build
 # open http://localhost:8080
 ```
 
-## Quick start (development, no Docker)
+On first start a superadmin is created from `RASTERFIT_SUPERADMIN_USERNAME`
+(default `superadmin`) and `RASTERFIT_SUPERADMIN_PASSWORD`; if the password is
+unset, a random one is printed to the container log. Sign in (👤) to use the app.
+
+## Quick start (development)
 
 ```bash
 # Rust core (native tests)
 cargo test
 
-# Web app
+# Native backend (required for the web app)
+cargo build --release -p rf-cli
+pip install -r server/requirements.txt
+uvicorn server.app:app --reload
+
+# Web app (dev server; proxies to the backend at :8080 in production)
 cd web
 npm ci
 npm run dev
 ```
 
-Optional native backend (for `/api/*`; the web app works without it):
-
-```bash
-cargo build --release -p rf-cli
-pip install -r server/requirements.txt
-uvicorn server.app:app --reload
-```
-
-## Accounts (native backend)
-
-The native backend supports optional self-hosted accounts:
+## Accounts
 
 - A **superadmin** defines and manages users (create, change role, disable,
   delete) from the web app's account panel (👤).
-- **Users** sign in to use the native backend; without a sign-in the app keeps
-  working through the local WASM core.
-- On first start a superadmin is created from
-  `RASTERFIT_SUPERADMIN_USERNAME` (default `superadmin`) and
-  `RASTERFIT_SUPERADMIN_PASSWORD`; if the password is unset, a random one is
-  printed to the container log.
+- **Users** sign in to use the app; import, solving, fitting and export all
+  require an authenticated session.
 - Users and sessions persist in SQLite on the `rasterfit_data` volume (`/data`).
 
 ## Privacy
 
-- No analytics or telemetry. Accounts are optional and self-hosted (see above).
-- The web app keeps imported rasters and the project autosave in the browser
-  (IndexedDB) when using the WASM core. If the optional native backend is
-  used, the uploaded raster is processed in temporary server-side session
-  storage (under the system temp dir) and is not persisted. Self-host the
-  backend and keep it off untrusted networks.
+- No analytics or telemetry. Accounts are self-hosted.
+- Uploaded rasters are processed in temporary server-side session storage
+  (under the system temp dir) and are not persisted; the browser keeps the
+  project autosave in IndexedDB. Self-host the backend and keep it off
+  untrusted networks.
 - No external fonts, CDNs, or runtime network calls.
 
 ## Keyboard & workflow
@@ -89,23 +81,23 @@ The native backend supports optional self-hosted accounts:
   `no-new-privileges` (see `compose.yaml`).
 - Users and sessions persist in a named `rasterfit_data` volume mounted at
   `/data`.
-- The browser falls back to the in-browser WASM core when `/api/*` is
-  unreachable, so a static `dist/` build also works standalone (GitHub Pages).
 
 ## Limitations (known)
 
 - Axe scans pass with no serious violations (one moderate `region` landmark
   note remains). Docker criteria D1–D7 were verified against the earlier
-  static-nginx image; D2/D3 (healthcheck/non-root/read-only, wasm MIME + CSP)
+  static-nginx image; D2/D3 (healthcheck/non-root/read-only, CSP)
   and the accounts/auth flow were re-verified against the native FastAPI +
   `rf-cli` image on 2026-10-26 (see `docs/ENV.md`). The native backend image is
   ~320 MB (vs ~28 MB for the static nginx image), so the former "image < 30 MB"
   criterion was retired in favour of a `< 800 MB` CI guard.
-- PDF pages render at up to 600 DPI within a single-canvas size cap (per-tile
-  native-resolution extraction is deferred); vector-only PDFs render as raster
-  without a dedicated warning yet.
+- PDF pages are rendered server-side (PyMuPDF) up to 600 DPI within a
+  single-canvas size cap; per-tile native-resolution extraction is deferred.
+  Vector-only PDFs render as raster without a dedicated warning yet.
 - Multi-arch (`linux/arm64`) builds require Docker Buildx, which is not present
   in the original development environment (see `docs/ENV.md`).
+- The app is server-only: it no longer runs from a static host (GitHub Pages)
+  or offline.
 
 ## License
 

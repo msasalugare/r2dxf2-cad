@@ -53,6 +53,8 @@ jobs:
           cache-dependency-path: web/package-lock.json
 
       - name: Build and start the container
+        env:
+          RASTERFIT_SUPERADMIN_PASSWORD: rasterfit-e2e
         run: docker compose up -d --build
 
       - name: Wait for healthcheck

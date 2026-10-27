@@ -17,5 +17,5 @@ pub mod svg;
 /// Precision type used for all world-space / math quantities.
 pub type F = f64;
 
-/// Crate version, exposed for the wasm layer and the UI.
+/// Crate version, exposed for the backend CLI and the UI.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

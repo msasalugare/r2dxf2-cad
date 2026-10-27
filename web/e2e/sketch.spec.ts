@@ -1,6 +1,11 @@
 import { expect, test } from '@playwright/test';
+import { login } from './helpers';
 
-test('draws a sketch and solves it via WASM', async ({ page }) => {
+test.beforeEach(async ({ page }) => {
+  await login(page);
+});
+
+test('draws a sketch and solves it via the backend solver', async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 720 });
   await page.goto('/');
   await page.locator('#sample-btn').click();

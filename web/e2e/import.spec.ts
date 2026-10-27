@@ -1,10 +1,15 @@
 import { expect, test } from '@playwright/test';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { login } from './helpers';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const tinyPng = path.join(here, 'fixtures', 'tiny.png');
 const twoPagePdf = path.join(here, 'fixtures', 'two-page.pdf');
+
+test.beforeEach(async ({ page }) => {
+  await login(page);
+});
 
 test('imports the bundled sample into the viewer', async ({ page }) => {
   await page.goto('/');

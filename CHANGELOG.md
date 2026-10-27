@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- **Server-only compute (WASM removed)**. The in-browser `rf-wasm` core is gone:
+  raster decoding/PDF rendering, ridge detection, constraint solving, fitting
+  (including masked fit), fit reports, and DXF/SVG export all run on the
+  FastAPI + `rf-cli` backend. The web app now requires a signed-in backend;
+  the offline/static-hosting fallback was removed (`rf-wasm` crate, `wasm.ts`,
+  `build-wasm.sh`, and the browser-side PDF.js renderer were deleted). The
+  server renders the raster and the browser displays that PNG, so the sketch
+  pixel frame always matches the server-side ridge frame (fixes PDF fit
+  consistency). Added `/api/report/json` and `/api/report/csv` endpoints.
+
+### Fixed
+
+- **Concurrent-request SQLite error**: per-request SQLite connections now use
+  `check_same_thread=False`. FastAPI runs sync dependencies/endpoints in a
+  threadpool, so a single request could create, use, and close its connection
+  on different worker threads, raising `sqlite3.ProgrammingError` under
+  parallel e2e workers.
+
 ### Added
 
 - **Native backend (FastAPI + `rf-cli`)**: a `server/app.py` FastAPI backend

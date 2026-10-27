@@ -4,7 +4,12 @@
 
 import { AccountController } from './account';
 import { Autosave, type AutosaveMeta } from './autosave';
-import { checkNativeBackend, uploadRasterToBackend } from './backend';
+import {
+  checkNativeBackend,
+  getActiveRasterSession,
+  renderBackendPdfPage,
+  uploadRasterToBackend,
+} from './backend';
 import { CalibrationController } from './calibration-ui';
 import { MaskController } from './mask-ui';
 import { SketchController } from './sketch-ui';
@@ -21,6 +26,7 @@ import {
 } from './project';
 import type { RasterPage } from './raster';
 import { createSampleBlob } from './sample';
+import { MAX_IMPORT_BYTES, sniffBlob } from './sniff';
 import { initTheme, toggleTheme } from './theme';
 import { RasterViewer } from './viewer';
 
@@ -141,14 +147,6 @@ export function initApp(): () => void {
     sketchPanel,
     locale,
     setStatus,
-    async () => {
-      if (!activePage) return null;
-      try {
-        return await importer.getGray(activePage.meta.pageIndex);
-      } catch {
-        return null;
-      }
-    },
     () => mask.getStrokes(),
     (dof, dofStatus) => {
       dofEl.textContent = tf(locale, 'status.dof', { dof });
@@ -305,9 +303,6 @@ export function initApp(): () => void {
 
     if (blob) {
       saveSession(blob, autosaveMeta(nextDoc, index, pageWorkspaces));
-      void uploadRasterToBackend(blob, nextDoc.fileName, 200, index + 1);
-    } else {
-      void createSampleBlob().then((b) => uploadRasterToBackend(b, 'sample.png', 200, 1));
     }
   };
 
@@ -321,7 +316,16 @@ export function initApp(): () => void {
 
     setStatus(t(locale, 'status.importing'));
     try {
-      const page = doc.kind === 'pdf' ? await importer.openPdfPage(index + 1) : activePage;
+      let page: RasterPage | null;
+      if (doc.kind === 'pdf') {
+        const rasterId = getActiveRasterSession()?.raster_id;
+        if (!rasterId) throw new Error('No server raster session');
+        const session = await renderBackendPdfPage(rasterId, index + 1, 200);
+        if (!session) throw new Error('Failed to render page on server');
+        page = await importer.buildFromServer(session);
+      } else {
+        page = activePage;
+      }
       if (!page) return;
       const previous = pageIndex;
       pageIndex = index;
@@ -357,22 +361,49 @@ export function initApp(): () => void {
 
   const importFromFile = async (file: File): Promise<void> => {
     setStatus(t(locale, 'status.importing'));
-    const result = await importer.importFile(file);
-    if (!result.ok) {
-      setStatus(errorMessage(result.code), true);
+    if (file.size > MAX_IMPORT_BYTES) {
+      setStatus(errorMessage('too-large'), true);
       return;
     }
-    showDocument(result.doc, result.page, 0, file);
+    const kind = await sniffBlob(file);
+    if (kind === 'unsupported') {
+      setStatus(errorMessage('unsupported'), true);
+      return;
+    }
+    // The server renders/decode the raster; the browser displays its PNG so the
+    // sketch pixel frame always matches the server-side ridge frame.
+    const session = await uploadRasterToBackend(file, file.name, 200, 1);
+    if (!session) {
+      setStatus(t(locale, 'error.server'), true);
+      return;
+    }
+    try {
+      const page = await importer.buildFromServer(session);
+      showDocument(
+        { kind: kind === 'pdf' ? 'pdf' : 'image', fileName: file.name, pageCount: session.page_count },
+        page,
+        0,
+        file,
+      );
+    } catch {
+      setStatus(errorMessage('failed'), true);
+    }
   };
 
   const importSample = async (): Promise<void> => {
     setStatus(t(locale, 'status.importing'));
-    const result = await importer.importSample();
-    if (!result.ok) {
-      setStatus(errorMessage(result.code), true);
-      return;
+    try {
+      const blob = await createSampleBlob();
+      const session = await uploadRasterToBackend(blob, 'sample.png', 200, 1);
+      if (!session) {
+        setStatus(t(locale, 'error.server'), true);
+        return;
+      }
+      const page = await importer.buildFromServer(session);
+      showDocument({ kind: 'sample', fileName: 'sample', pageCount: 1 }, page, 0, null);
+    } catch {
+      setStatus(errorMessage('failed'), true);
     }
-    showDocument(result.doc, result.page, 0, null);
   };
 
   const continueAutosave = async (): Promise<void> => {
@@ -382,14 +413,24 @@ export function initApp(): () => void {
     if (!record) return;
     const file = new File([record.blob], record.meta.fileName, { type: record.blob.type });
     setStatus(t(locale, 'status.importing'));
-    const result = await importer.importFile(file);
-    if (!result.ok) {
-      setStatus(errorMessage(result.code), true);
+    const kind = await sniffBlob(file);
+    const session = await uploadRasterToBackend(file, record.meta.fileName, 200, 1);
+    if (!session) {
+      setStatus(t(locale, 'error.server'), true);
       return;
     }
-    showDocument(result.doc, result.page, 0, file, record.meta.pages);
-    if (record.meta.pageIndex > 0) {
-      await showPage(record.meta.pageIndex);
+    try {
+      const page = await importer.buildFromServer(session);
+      showDocument(
+        { kind: kind === 'pdf' ? 'pdf' : 'image', fileName: record.meta.fileName, pageCount: session.page_count },
+        page,
+        0,
+        file,
+        record.meta.pages,
+      );
+      if (record.meta.pageIndex > 0) await showPage(record.meta.pageIndex);
+    } catch {
+      setStatus(errorMessage('failed'), true);
     }
   };
 
@@ -409,6 +450,8 @@ export function initApp(): () => void {
     else {
       sketch.deactivate();
       mask.deactivate();
+      accountPanel.hidden = true;
+      pagesPanel.hidden = true;
       calibration.activate();
     }
   });
@@ -417,6 +460,8 @@ export function initApp(): () => void {
     else {
       calibration.deactivate();
       mask.deactivate();
+      accountPanel.hidden = true;
+      pagesPanel.hidden = true;
       sketch.activate();
     }
   });
@@ -429,12 +474,16 @@ export function initApp(): () => void {
     else {
       calibration.deactivate();
       sketch.deactivate();
+      accountPanel.hidden = true;
+      pagesPanel.hidden = true;
       mask.activate();
     }
   });
   document.querySelector('#origin-tool-btn')!.addEventListener('click', () => {
     calibration.deactivate();
     mask.deactivate();
+    accountPanel.hidden = true;
+    pagesPanel.hidden = true;
     if (!sketch.isActive()) sketch.activate();
     sketch.setTool('origin');
   });
@@ -448,6 +497,12 @@ export function initApp(): () => void {
   document.querySelector('#prev-btn')!.addEventListener('click', () => void showPage(pageIndex - 1));
   document.querySelector('#next-btn')!.addEventListener('click', () => void showPage(pageIndex + 1));
   document.querySelector('#pages-toggle')!.addEventListener('click', () => {
+    if (pagesPanel.hidden) {
+      accountPanel.hidden = true;
+      calibration.deactivate();
+      sketch.deactivate();
+      mask.deactivate();
+    }
     pagesPanel.hidden = !pagesPanel.hidden;
   });
   document.querySelector('#continue-btn')!.addEventListener('click', () => void continueAutosave());
@@ -458,6 +513,12 @@ export function initApp(): () => void {
 
   document.querySelector('#theme-btn')!.addEventListener('click', () => toggleTheme());
   accountBtn.addEventListener('click', () => {
+    if (accountPanel.hidden) {
+      calibration.deactivate();
+      sketch.deactivate();
+      mask.deactivate();
+      pagesPanel.hidden = true;
+    }
     accountPanel.hidden = !accountPanel.hidden;
   });
 
@@ -506,12 +567,20 @@ export function initApp(): () => void {
       const { data, raster } = unzipProject(await blobToBytes(file));
       const rasterFile = new File([raster as BlobPart], data.fileName);
       setStatus(t(locale, 'status.importing'));
-      const result = await importer.importFile(rasterFile);
-      if (!result.ok) {
-        setStatus(errorMessage(result.code), true);
+      const kind = await sniffBlob(rasterFile);
+      const session = await uploadRasterToBackend(rasterFile, data.fileName, 200, 1);
+      if (!session) {
+        setStatus(t(locale, 'error.server'), true);
         return;
       }
-      showDocument(result.doc, result.page, 0, rasterFile, data.pages);
+      const page = await importer.buildFromServer(session);
+      showDocument(
+        { kind: kind === 'pdf' ? 'pdf' : 'image', fileName: data.fileName, pageCount: session.page_count },
+        page,
+        0,
+        rasterFile,
+        data.pages,
+      );
       if (data.pageIndex > 0) await showPage(data.pageIndex);
     } catch {
       setStatus(t(locale, 'error.failed'), true);

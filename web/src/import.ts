@@ -1,39 +1,20 @@
-// Import pipeline: File/Blob → decoded raster page (gray8 + tile pyramid).
-//
-// Raster images are decoded with `createImageBitmap` and PDFs are rendered via
-// PDF.js; both hand a full-res ImageBitmap to the raster worker, which builds
-// the gray8 buffer and ImageBitmap tile pyramid.
+// Import pipeline: the server decodes/render the raster (PDF/image) and returns
+// a PNG; the browser fetches that PNG and hands it to the raster worker, which
+// builds the gray8 buffer and ImageBitmap tile pyramid for display.
 
-import type { PDFDocumentProxy } from 'pdfjs-dist';
-
-import { MAX_IMPORT_BYTES, sniffBlob, type SourceKind } from './sniff';
+import type { NativeRasterSession } from './backend';
 import type { PageMeta, RasterPage } from './raster';
-import { isInvalidPdfError, isPasswordError, openPdfDocument, renderPageBitmap } from './pdf';
-import { createSampleRaster } from './sample';
 
 export type ImportErrorCode = 'too-large' | 'encrypted' | 'corrupt' | 'unsupported' | 'failed';
 
 /** A successfully imported document kind (sample = the bundled demo). */
 export type DocumentKind = 'pdf' | 'image' | 'sample';
 
-export interface ImportFailure {
-  ok: false;
-  code: ImportErrorCode;
-}
-
 export interface ImportDocument {
   kind: DocumentKind;
   fileName: string;
   pageCount: number;
 }
-
-export interface ImportSuccess {
-  ok: true;
-  doc: ImportDocument;
-  page: RasterPage;
-}
-
-export type ImportResult = ImportSuccess | ImportFailure;
 
 interface Pending {
   resolve: (page: RasterPage) => void;
@@ -117,84 +98,29 @@ class RasterWorker {
   }
 }
 
-/** Orchestrates import and, for PDFs, on-demand page switching. */
+/** Builds display pages from server-rendered rasters and exposes gray buffers. */
 export class Importer {
   private worker = new RasterWorker();
-  private pdfDoc: PDFDocumentProxy | null = null;
 
   private async build(bitmap: ImageBitmap, meta: PageMeta): Promise<RasterPage> {
     return this.worker.build(bitmap, meta);
   }
 
-  async importFile(file: File): Promise<ImportResult> {
-    if (file.size > MAX_IMPORT_BYTES) return { ok: false, code: 'too-large' };
-
-    const kind: SourceKind = await sniffBlob(file);
-    if (kind === 'unsupported') return { ok: false, code: 'unsupported' };
-    if (kind === 'image') return this.importImage(file);
-    return this.importPdf(file);
-  }
-
-  private async importImage(file: File): Promise<ImportResult> {
-    try {
-      const bitmap = await createImageBitmap(file);
-      const meta: PageMeta = {
-        pageIndex: 0,
-        width: bitmap.width,
-        height: bitmap.height,
-        dpi: 0,
-      };
-      const page = await this.build(bitmap, meta);
-      return { ok: true, doc: { kind: 'image', fileName: file.name, pageCount: 1 }, page };
-    } catch {
-      return { ok: false, code: 'corrupt' };
-    }
-  }
-
-  private async importPdf(file: File): Promise<ImportResult> {
-    try {
-      const data = new Uint8Array(await file.arrayBuffer());
-      const doc = await openPdfDocument(data);
-      this.pdfDoc = doc;
-      const page = await this.renderPdfPage(1);
-      return {
-        ok: true,
-        doc: { kind: 'pdf', fileName: file.name, pageCount: doc.numPages },
-        page,
-      };
-    } catch (err) {
-      this.disposePdf();
-      if (isPasswordError(err)) return { ok: false, code: 'encrypted' };
-      if (isInvalidPdfError(err)) return { ok: false, code: 'corrupt' };
-      return { ok: false, code: 'failed' };
-    }
-  }
-
-  async importSample(): Promise<ImportResult> {
-    try {
-      const sample = createSampleRaster();
-      const page = await this.build(sample.bitmap, sample.meta);
-      return {
-        ok: true,
-        doc: { kind: 'sample', fileName: sample.name, pageCount: 1 },
-        page,
-      };
-    } catch {
-      return { ok: false, code: 'failed' };
-    }
-  }
-
-  /** Render a PDF page (1-based) and build its raster pyramid. */
-  async openPdfPage(pageNumber: number): Promise<RasterPage> {
-    if (!this.pdfDoc) throw new Error('No PDF document open');
-    return this.renderPdfPage(pageNumber);
-  }
-
-  private async renderPdfPage(pageNumber: number): Promise<RasterPage> {
-    const doc = this.pdfDoc;
-    if (!doc) throw new Error('No PDF document open');
-    const rendered = await renderPageBitmap(doc, pageNumber);
-    return this.build(rendered.bitmap, rendered.meta);
+  /**
+   * Build a raster page from a server-rendered image (the backend is the single
+   * source of truth for raster pixels). The returned page lives in the same
+   * pixel frame as the backend's cached ridges, so fits stay consistent.
+   */
+  async buildFromServer(session: NativeRasterSession): Promise<RasterPage> {
+    const res = await fetch(session.image_url);
+    if (!res.ok) throw new Error('Failed to load rendered raster');
+    const bitmap = await createImageBitmap(await res.blob());
+    return this.build(bitmap, {
+      pageIndex: Math.max(0, session.page - 1),
+      width: session.width,
+      height: session.height,
+      dpi: session.dpi,
+    });
   }
 
   /** Free a page's worker-side gray8 buffer. */
@@ -202,20 +128,12 @@ export class Importer {
     this.worker.free(pageIndex);
   }
 
-  /** Retrieve a page's gray8 analysis buffer (for ridge detection). */
+  /** Retrieve a page's gray8 analysis buffer (for raster snapping). */
   getGray(pageIndex: number): Promise<{ data: Uint8Array; width: number; height: number }> {
     return this.worker.getGray(pageIndex);
   }
 
-  private disposePdf(): void {
-    if (this.pdfDoc) {
-      void this.pdfDoc.loadingTask.destroy();
-      this.pdfDoc = null;
-    }
-  }
-
   dispose(): void {
-    this.disposePdf();
     this.worker.dispose();
   }
 }

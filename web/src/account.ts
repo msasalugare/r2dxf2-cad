@@ -1,8 +1,7 @@
 // Account / login + user management (superadmin defines users).
 //
-// This talks only to the native backend (`/api/auth/*`, `/api/users`). When the
-// backend is unreachable or the user is not signed in, the rest of the app keeps
-// working through the in-browser WASM core.
+// This talks only to the native backend (`/api/auth/*`, `/api/users`). The app
+// is server-only, so signing in is required to import and compute.
 
 import { t, tf, type Locale } from './i18n';
 import {
