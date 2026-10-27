@@ -254,7 +254,11 @@ export class CalibrationController {
         this.levelPending = null;
         this.mode = 'segment';
         this.applyTransform();
-        this.onStatus(t(this.locale, 'status.ready'));
+        this.onStatus(
+          tf(this.locale, 'calibrate.leveled', {
+            deg: ((this.rotation * 180) / Math.PI).toFixed(1),
+          }),
+        );
         this.render();
         this.onChange?.();
       }

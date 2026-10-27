@@ -42,10 +42,33 @@ body {
   display: flex;
   align-items: center;
   height: var(--appbar-height);
-  padding: 0 var(--space-12);
+  padding: 0 calc(var(--target-coarse) * 2 + var(--space-12)) 0 var(--space-12);
   background: var(--color-surface-shell);
   border-bottom: var(--border-width) solid var(--color-divider);
   z-index: var(--z-panel);
+}
+
+.app-logo {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  line-height: 1.1;
+  padding-right: var(--space-16);
+  margin-right: var(--space-8);
+  border-right: var(--border-width) solid var(--color-divider);
+  flex: 0 0 auto;
+}
+
+.app-logo-name {
+  font-size: var(--font-size-heading);
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-text-primary);
+}
+
+.app-logo-byline {
+  font-size: var(--font-size-micro);
+  color: var(--color-text-secondary);
 }
 
 /* --- Workspace (viewer + docks + overlays) ----------------------------- */
@@ -170,43 +193,37 @@ body {
   position: absolute;
   inset: 0;
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
+  gap: var(--space-24);
   padding: var(--space-24);
   background: var(--color-surface-shell);
   z-index: calc(var(--z-status) + 1);
 }
 
-.auth-card {
-  width: min(360px, 100%);
-  padding: var(--space-32);
-  background: var(--color-surface-panel);
-  border: var(--border-width) solid var(--color-divider);
-  border-radius: var(--radius-overlay);
-  box-shadow: var(--shadow-overlay);
+.auth-brand {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-4);
   text-align: center;
 }
 
-.auth-title {
-  margin: 0;
-  font-size: var(--font-size-title);
+.auth-logo {
+  font-size: var(--font-size-quantity);
   font-weight: var(--font-weight-semibold);
-  line-height: var(--line-height-quantity);
+  letter-spacing: 0.02em;
+  color: var(--color-text-primary);
 }
 
-.auth-tagline {
-  margin: var(--space-8) 0 0;
-  color: var(--color-text-secondary);
-}
-
-.auth-hint {
-  margin: var(--space-16) 0 var(--space-8);
+.auth-byline {
   font-size: var(--font-size-secondary);
   color: var(--color-text-secondary);
 }
 
-.auth-card .account-form {
-  text-align: left;
+.auth-login-form {
+  width: min(320px, 100%);
 }
 
 /* Workspace chrome is hidden while signed out; the auth screen is hidden once
@@ -287,7 +304,8 @@ body.is-dragging .start-card {
   align-items: center;
   gap: var(--space-4);
   min-width: 0;
-  overflow: hidden;
+  overflow-x: auto;
+  overflow-y: hidden;
 }
 
 .toolbar-group {
@@ -417,11 +435,17 @@ body.is-dragging .start-card {
 }
 
 .sketch-toolbar-title {
-  margin-bottom: 5px;
+  margin: 0 0 5px;
   font-size: 11px;
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.03em;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  user-select: none;
+}
+
+.sketch-toolbar-title::marker {
   color: var(--color-text-secondary);
 }
 

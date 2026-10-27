@@ -579,6 +579,7 @@ export function initApp(): () => void {
   });
   document.querySelector('#save-project')!.addEventListener('click', () => void saveProject());
   document.querySelector('#open-project')!.addEventListener('click', () => projectInput.click());
+  document.querySelector('#toolbar-export-dxf')!.addEventListener('click', () => void sketch.exportDxf());
   document.querySelector('#prev-btn')!.addEventListener('click', () => void showPage(pageIndex - 1));
   document.querySelector('#next-btn')!.addEventListener('click', () => void showPage(pageIndex + 1));
   document.querySelector('#pages-toggle')!.addEventListener('click', () => {
@@ -760,18 +761,23 @@ function autosaveMeta(
 function markup(locale: Locale): string {
   return `
   <header class="app-bar">
+    <span class="app-logo" title="RasterFit by Saša Mladenović & DeepSeek">
+      <span class="app-logo-name">RasterFit</span>
+      <span class="app-logo-byline">by Saša Mladenović &amp; DeepSeek</span>
+    </span>
     <div class="toolbar" role="toolbar" aria-label="Viewer" hidden>
       <div class="toolbar-group">
-        <button id="toolbar-open" class="tool-btn" type="button" title="${t(locale, 'start.open')}">${t(locale, 'start.open')}</button>
-        <button id="save-project" class="tool-btn" type="button" title="${t(locale, 'project.save')}">${t(locale, 'project.save')}</button>
-        <button id="open-project" class="tool-btn" type="button" title="${t(locale, 'project.open')}">${t(locale, 'project.open')}</button>
+        <button id="toolbar-open" class="tool-btn" type="button" title="${t(locale, 'start.open')}">📂 ${t(locale, 'start.open')}</button>
+        <button id="save-project" class="tool-btn" type="button" title="${t(locale, 'project.save')}">💾 ${t(locale, 'project.save')}</button>
+        <button id="open-project" class="tool-btn" type="button" title="${t(locale, 'project.open')}">📁 ${t(locale, 'project.open')}</button>
+        <button id="toolbar-export-dxf" class="tool-btn" type="button" title="${t(locale, 'sketch.exportDxf')}">📄 ${t(locale, 'sketch.exportDxf')}</button>
       </div>
       <span class="toolbar-divider" aria-hidden="true"></span>
       <div class="toolbar-group">
-        <button id="calibrate-btn" class="tool-btn" type="button" title="${t(locale, 'toolbar.calibrate')} (C)">${t(locale, 'toolbar.calibrate')}</button>
-        <button id="sketch-btn" class="tool-btn" type="button" title="${t(locale, 'toolbar.sketch')} (S)">${t(locale, 'toolbar.sketch')}</button>
-        <button id="mask-btn" class="tool-btn" type="button" title="${t(locale, 'toolbar.mask')} (M)">${t(locale, 'toolbar.mask')}</button>
-        <button id="adjust-btn" class="tool-btn" type="button" title="${t(locale, 'toolbar.adjust')}">${t(locale, 'toolbar.adjust')}</button>
+        <button id="calibrate-btn" class="tool-btn" type="button" title="${t(locale, 'toolbar.calibrate')} (C)">📏 ${t(locale, 'toolbar.calibrate')}</button>
+        <button id="sketch-btn" class="tool-btn" type="button" title="${t(locale, 'toolbar.sketch')} (S)">✏️ ${t(locale, 'toolbar.sketch')}</button>
+        <button id="mask-btn" class="tool-btn" type="button" title="${t(locale, 'toolbar.mask')} (M)">🖌️ ${t(locale, 'toolbar.mask')}</button>
+        <button id="adjust-btn" class="tool-btn" type="button" title="${t(locale, 'toolbar.adjust')}">🎚️ ${t(locale, 'toolbar.adjust')}</button>
       </div>
       <span class="toolbar-divider" aria-hidden="true"></span>
       <div class="toolbar-group">
@@ -781,7 +787,7 @@ function markup(locale: Locale): string {
       <span class="toolbar-divider" aria-hidden="true"></span>
       <div class="toolbar-group">
         <button id="zoom-out-btn" class="tool-btn" type="button" title="${t(locale, 'viewer.zoomOut')} (-)">−</button>
-        <button id="fit-btn" class="tool-btn" type="button" title="${t(locale, 'viewer.fit')} (0)">${t(locale, 'viewer.fit')}</button>
+        <button id="fit-btn" class="tool-btn" type="button" title="${t(locale, 'viewer.fit')} (0)">⤢ ${t(locale, 'viewer.fit')}</button>
         <button id="zoom-in-btn" class="tool-btn" type="button" title="${t(locale, 'viewer.zoomIn')} (+)">+</button>
       </div>
       <span class="toolbar-divider" aria-hidden="true"></span>

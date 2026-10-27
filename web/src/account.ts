@@ -68,21 +68,20 @@ export class AccountController {
 
   private authScreenMarkup(): string {
     return `
-      <div class="auth-card">
-        <h1 class="auth-title">${t(this.locale, 'app.title')}</h1>
-        <p class="auth-tagline">${t(this.locale, 'app.tagline')}</p>
-        <p class="auth-hint">${t(this.locale, 'account.notAuthenticated')}</p>
-        <form data-action="login" class="account-form">
-          <label>${t(this.locale, 'account.username')}
-            <input name="username" autocomplete="username" required />
-          </label>
-          <label>${t(this.locale, 'account.password')}
-            <input name="password" type="password" autocomplete="current-password" required />
-          </label>
-          <button type="submit" class="btn btn-primary">${t(this.locale, 'account.login')}</button>
-        </form>
-        <p class="account-msg" data-account-msg></p>
-      </div>`;
+      <div class="auth-brand">
+        <span class="auth-logo">RasterFit</span>
+        <span class="auth-byline">by Saša Mladenović &amp; DeepSeek</span>
+      </div>
+      <form data-action="login" class="account-form auth-login-form">
+        <label>${t(this.locale, 'account.username')}
+          <input name="username" autocomplete="username" required />
+        </label>
+        <label>${t(this.locale, 'account.password')}
+          <input name="password" type="password" autocomplete="current-password" required />
+        </label>
+        <button type="submit" class="btn btn-primary">${t(this.locale, 'account.login')}</button>
+      </form>
+      <p class="account-msg" data-account-msg></p>`;
   }
 
   private accountMarkup(): string {

@@ -3608,8 +3608,8 @@ export class SketchController {
       ${solverBannerHtml}
       <p class="cal-hint">${selectionSummary ? `Sel: ${escapeHtml(selectionSummary)}` : t(locale, this.pending || this.arcStartPending || this.arc3PtPending ? 'sketch.finishChain' : 'sketch.hint')}</p>
 
-      <div class="sketch-toolbar-box" role="group" aria-label="Selection & Coordinate System Toolbar">
-        <div class="sketch-toolbar-title">1 · Selection & Coordinate System (0,0)</div>
+      <details class="sketch-toolbar-box" role="group" open aria-label="Selection & Coordinate System Toolbar">
+        <summary class="sketch-toolbar-title">1 · Selection & Coordinate System (0,0)</summary>
         <div class="cal-actions">
           <button id="sketch-tool-select" class="btn ${this.tool === 'select' ? 'btn-tool-active' : ''}" type="button" title="${t(locale, 'sketch.tool.select')}">↖ Select / Move (V)</button>
           <button id="sketch-tool-origin" class="btn ${this.tool === 'origin' ? 'btn-tool-active' : ''}" type="button" title="Move (0,0) Coordinate System Origin">🎯 Set (0,0) [${Math.round(orig.x)}, ${Math.round(orig.y)}]</button>
@@ -3626,10 +3626,10 @@ export class SketchController {
           <label class="cal-label"><input id="sketch-auto" type="checkbox" ${this.autoConstraints ? 'checked' : ''} /> ${t(locale, 'sketch.autoConstraint')}</label>
           <label class="cal-label"><input id="sketch-grid-snap" type="checkbox" ${this.viewer.isGridSnapEnabled() ? 'checked' : ''} /> ${t(locale, 'sketch.gridSnap')}</label>
         </div>
-      </div>
+      </details>
 
-      <div class="sketch-toolbar-box" role="group" aria-label="Geometry Tools">
-        <div class="sketch-toolbar-title">2 · Draw & Modify Geometry</div>
+      <details class="sketch-toolbar-box" role="group" open aria-label="Geometry Tools">
+        <summary class="sketch-toolbar-title">2 · Draw & Modify Geometry</summary>
         <div class="cal-actions">
           <button id="sketch-tool-polyline" class="btn ${this.tool === 'polyline' ? 'btn-tool-active' : ''}" type="button" title="${t(locale, 'sketch.tool.polyline')}">Polyline (P)</button>
           <button id="sketch-tool-line" class="btn ${this.tool === 'line' ? 'btn-tool-active' : ''}" type="button" title="${t(locale, 'sketch.tool.line')}">╱ Line (L)</button>
@@ -3649,10 +3649,10 @@ export class SketchController {
             ? `<div class="cal-actions"><button id="sketch-finish-chain" class="btn btn-primary" type="button">${t(locale, 'sketch.finishChain')}</button></div>`
             : ''
         }
-      </div>
+      </details>
 
-      <div class="sketch-toolbar-box" role="group" aria-label="Geometric Constraints">
-        <div class="sketch-toolbar-title">3 · Geometric Constraints</div>
+      <details class="sketch-toolbar-box" role="group" aria-label="Geometric Constraints">
+        <summary class="sketch-toolbar-title">3 · Geometric Constraints</summary>
         <div class="cal-actions">
           <button class="btn sketch-fc-c" data-action="Coincident" type="button" title="Coincident (2 pts)">● Coinc</button>
           <button class="btn sketch-fc-c" data-action="PointOnObject" type="button" title="Point on Object">⟐ OnObj</button>
@@ -3667,10 +3667,10 @@ export class SketchController {
           <button class="btn sketch-fc-c" data-action="Collinear" type="button" title="Collinear">∥ Col</button>
           <button class="btn sketch-fc-c" data-action="Block" type="button" title="Block / Fix to Raster (B)">🔒 Fix</button>
         </div>
-      </div>
+      </details>
 
-      <div class="sketch-toolbar-box" role="group" aria-label="Dimensional Constraints">
-        <div class="sketch-toolbar-title">4 · Dimensional Constraints</div>
+      <details class="sketch-toolbar-box" role="group" aria-label="Dimensional Constraints">
+        <summary class="sketch-toolbar-title">4 · Dimensional Constraints</summary>
         <div class="cal-actions">
           <button class="btn sketch-fc-c" data-action="Distance" type="button" title="Distance / Length (D)">↔ Dist</button>
           <button class="btn sketch-fc-c" data-action="HorizontalDistance" type="button" title="Horizontal Distance">ΔX</button>
@@ -3711,10 +3711,10 @@ export class SketchController {
           <input id="sketch-c-val" class="cal-length w-54" type="number" value="50" aria-label="Value" />
           <button id="sketch-c-add" class="btn" type="button">+</button>
         </div>
-      </div>
+      </details>
 
-      <div class="sketch-toolbar-box" role="group" aria-label="Solver, Fit & Export">
-        <div class="sketch-toolbar-title">5 · Solver, RasterFit & Export</div>
+      <details class="sketch-toolbar-box" role="group" open aria-label="Solver, Fit & Export">
+        <summary class="sketch-toolbar-title">5 · Solver, RasterFit & Export</summary>
         <div class="cal-actions">
           <button id="sketch-solve" class="btn btn-primary" type="button">${t(locale, 'sketch.solve')}</button>
           <button id="sketch-fit" class="btn" type="button">${t(locale, 'sketch.fit')}</button>
@@ -3728,7 +3728,7 @@ export class SketchController {
           <button id="export-json" class="btn" type="button">${t(locale, 'sketch.exportJson')}</button>
           <button id="export-csv" class="btn" type="button">${t(locale, 'sketch.exportCsv')}</button>
         </div>
-      </div>
+      </details>
 
       <details class="mb-8">
         <summary class="cal-subhead cursor-pointer">${t(locale, 'sketch.fitDialog')}</summary>
