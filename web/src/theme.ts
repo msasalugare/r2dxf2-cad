@@ -1,8 +1,8 @@
-// Theme management: prefers-color-scheme with a persisted manual override.
+// Theme management: CAD-dark default with a persisted manual override.
 
 export type Theme = 'light' | 'dark';
 
-const STORAGE_KEY = 'rasterfit.theme';
+const STORAGE_KEY = 'rasterfit-cad.theme';
 
 /** Resolve the initial theme, applying it to `documentElement`. */
 export function initTheme(root: HTMLElement = document.documentElement): Theme {
@@ -18,7 +18,7 @@ export function resolveTheme(): Theme {
   } catch {
     // localStorage unavailable (private mode / tests): fall through.
   }
-  return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+  return 'dark';
 }
 
 export function applyTheme(theme: Theme, root: HTMLElement = document.documentElement): void {

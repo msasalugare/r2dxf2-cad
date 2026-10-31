@@ -1,14 +1,32 @@
 //! DXF export of the sketch (mm units, y-up).
 //!
 //! Emits ASCII DXF R12 `LINE`, `CIRCLE`, and `ARC` entities on `geometry` /
-//! `construction` layers. See `docs/FILE_FORMAT.md` and T14.
+//! `construction` layers, plus optional `TEXT` entities on `annotations`.
+//! See `docs/FILE_FORMAT.md` and T14.
 
 use std::fmt::Write;
 
+use serde::{Deserialize, Serialize};
+
 use crate::sketch::Sketch;
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TextAnnotation {
+    pub id: u32,
+    pub x: f64,
+    pub y: f64,
+    pub text: String,
+    pub height: f64,
+    pub rotation: f64,
+}
 
 /// Serialize a sketch to ASCII DXF.
 pub fn export_dxf(sketch: &Sketch) -> String {
+    export_dxf_with_texts(sketch, &[])
+}
+
+/// Serialize a sketch and text annotations to ASCII DXF.
+pub fn export_dxf_with_texts(sketch: &Sketch, texts: &[TextAnnotation]) -> String {
     let mut out = String::new();
     out.push_str("0\nSECTION\n2\nENTITIES\n");
 
@@ -60,6 +78,21 @@ pub fn export_dxf(sketch: &Sketch) -> String {
         group(&mut out, 40, fmt_num(arc.radius));
         group(&mut out, 50, fmt_num(arc.start.to_degrees()));
         group(&mut out, 51, fmt_num(arc.end.to_degrees()));
+    }
+
+    for text in texts {
+        let (sin, cos) = text.rotation.sin_cos();
+        for (line_index, content) in text.text.lines().enumerate() {
+            let offset = line_index as f64 * 1.2 * text.height;
+            group(&mut out, 0, "TEXT");
+            group(&mut out, 8, "annotations");
+            group(&mut out, 10, fmt_num(text.x + offset * sin));
+            group(&mut out, 20, fmt_num(text.y - offset * cos));
+            group(&mut out, 30, "0");
+            group(&mut out, 40, fmt_num(text.height));
+            group(&mut out, 50, fmt_num(text.rotation.to_degrees()));
+            group(&mut out, 1, content);
+        }
     }
 
     out.push_str("0\nENDSEC\n0\nEOF\n");
@@ -150,6 +183,7 @@ mod tests {
         let dxf = export_dxf(&sketch);
         let entities = parse_entities(&dxf);
 
+        assert_eq!(dxf, export_dxf_with_texts(&sketch, &[]));
         assert_eq!(entities.lines.len(), 2);
         assert_eq!(entities.circles.len(), 1);
         assert_eq!(entities.arcs.len(), 1);
@@ -177,11 +211,60 @@ mod tests {
         assert!((entities.arcs[0].end_deg - 90.0).abs() < 1e-6);
     }
 
+    #[test]
+    fn dxf_exports_text_annotation_properties() {
+        let texts = [TextAnnotation {
+            id: 7,
+            x: 12.25,
+            y: -3.5,
+            text: "Part A".to_string(),
+            height: 2.5,
+            rotation: std::f64::consts::FRAC_PI_2,
+        }];
+
+        let entities = parse_entities(&export_dxf_with_texts(&Sketch::default(), &texts));
+
+        assert_eq!(entities.texts.len(), 1);
+        let text = &entities.texts[0];
+        assert_eq!(text.layer, "annotations");
+        assert!((text.x - 12.25).abs() < 1e-6);
+        assert!((text.y - -3.5).abs() < 1e-6);
+        assert_eq!(text.z, 0.0);
+        assert!((text.height - 2.5).abs() < 1e-6);
+        assert!((text.rotation_deg - 90.0).abs() < 1e-6);
+        assert_eq!(text.content, "Part A");
+    }
+
+    #[test]
+    fn dxf_exports_multiline_text_downward_perpendicular_to_baseline() {
+        let texts = [TextAnnotation {
+            id: 8,
+            x: 10.0,
+            y: 20.0,
+            text: "first\nsecond\nthird".to_string(),
+            height: 2.5,
+            rotation: std::f64::consts::FRAC_PI_2,
+        }];
+
+        let entities = parse_entities(&export_dxf_with_texts(&Sketch::default(), &texts));
+
+        assert_eq!(entities.texts.len(), 3);
+        for (index, text) in entities.texts.iter().enumerate() {
+            assert!((text.x - (10.0 + index as f64 * 3.0)).abs() < 1e-6);
+            assert!((text.y - 20.0).abs() < 1e-6);
+            assert!((text.rotation_deg - 90.0).abs() < 1e-6);
+        }
+        assert_eq!(entities.texts[0].content, "first");
+        assert_eq!(entities.texts[1].content, "second");
+        assert_eq!(entities.texts[2].content, "third");
+    }
+
     /// Minimal ASCII-DXF entity parser for the round-trip test (dev only).
     struct Entities {
         lines: Vec<LineEntity>,
         circles: Vec<CircleEntity>,
         arcs: Vec<ArcEntity>,
+        texts: Vec<TextEntity>,
     }
 
     struct LineEntity {
@@ -208,10 +291,21 @@ mod tests {
         end_deg: f64,
     }
 
+    struct TextEntity {
+        layer: String,
+        x: f64,
+        y: f64,
+        z: f64,
+        height: f64,
+        rotation_deg: f64,
+        content: String,
+    }
+
     fn parse_entities(dxf: &str) -> Entities {
         let mut lines = Vec::new();
         let mut circles = Vec::new();
         let mut arcs = Vec::new();
+        let mut texts = Vec::new();
 
         let tokens: Vec<&str> = dxf.lines().map(|l| l.trim()).collect();
         let mut i = 0;
@@ -294,6 +388,35 @@ mod tests {
                     }
                     arcs.push(e);
                 }
+                0 if value == "TEXT" => {
+                    let mut e = TextEntity {
+                        layer: String::new(),
+                        x: 0.0,
+                        y: 0.0,
+                        z: 0.0,
+                        height: 0.0,
+                        rotation_deg: 0.0,
+                        content: String::new(),
+                    };
+                    i += 2;
+                    while i + 1 < tokens.len() {
+                        let c: i32 = tokens[i].parse().unwrap_or(-1);
+                        let v = tokens[i + 1];
+                        match c {
+                            8 => e.layer = v.to_string(),
+                            10 => e.x = v.parse().unwrap(),
+                            20 => e.y = v.parse().unwrap(),
+                            30 => e.z = v.parse().unwrap(),
+                            40 => e.height = v.parse().unwrap(),
+                            50 => e.rotation_deg = v.parse().unwrap(),
+                            1 => e.content = v.to_string(),
+                            0 => break,
+                            _ => {}
+                        }
+                        i += 2;
+                    }
+                    texts.push(e);
+                }
                 _ => i += 2,
             }
         }
@@ -302,6 +425,7 @@ mod tests {
             lines,
             circles,
             arcs,
+            texts,
         }
     }
 }

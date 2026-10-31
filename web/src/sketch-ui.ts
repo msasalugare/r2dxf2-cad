@@ -28,14 +28,23 @@ import {
   type SolveResponse,
 } from './backend';
 import { t, tf, type Locale, type MessageKey } from './i18n';
+import {
+  dimensionValueFromRaster,
+  dimensionValueToRaster,
+  isDimensionKey,
+  isValidDimensionValue,
+  measureDimension,
+} from './sketch-dimensions';
+import { cornerChamferGeometry, cornerFilletGeometry } from './sketch-fillet';
 import type {
   SavedSketchArc,
   SavedSketchCircle,
   SavedSketchData,
   SavedSketchLine,
   SavedSketchPoint,
+  SavedSketchText,
 } from './project';
-import { sketchToWorld } from './project';
+import { sketchToPart } from './project';
 import type { Affine, RasterViewer } from './viewer';
 
 export type SketchTool =
@@ -49,6 +58,8 @@ export type SketchTool =
   | 'arc3pt'
   | 'polygon'
   | 'fillet'
+  | 'chamfer'
+  | 'roundedRect'
   | 'trim'
   | 'mirror'
   | 'point'
@@ -89,9 +100,14 @@ export class SketchController {
   private dimBadgeRects: { cIdx: number; x: number; y: number; w: number; h: number }[] = [];
   private polyMode: PolylineSubMode = 'line';
   private polygonSides = 6;
+  private filletRadiusMm: number | null = null;
+  private chamferFirstMm = 10;
+  private chamferSecondMm = 10;
+  private roundedRectRadiusMm: number | null = null;
   private constructionMode = false;
   private autoConstraints = true;
   private rasterSnapEnabled = true;
+  private guideSnapEnabled = true;
   private autoPinRaster = false;
   private loupeEnabled = false;
   private grayCache: { data: Uint8Array; width: number; height: number } | null = null;
@@ -164,6 +180,8 @@ export class SketchController {
   private lastFitJson: string | null = null;
   private lastFit: FitResponse | null = null;
 
+  textProvider: () => SavedSketchText[] = () => [];
+
   constructor(
     private viewer: RasterViewer,
     private panel: HTMLElement,
@@ -177,10 +195,21 @@ export class SketchController {
     }[],
     private onDofChange?: (dof: number, status: 'ok' | 'under' | 'conflict') => void,
     private onChange?: () => void,
-  ) {}
+    private snapToGuide?: (
+      point: { x: number; y: number },
+      tolerancePx: number,
+    ) => { x: number; y: number; snapped: boolean },
+  ) {
+    document.documentElement.dataset.guideSnap = 'true';
+    document.documentElement.dataset.rasterSnap = 'true';
+  }
 
   isActive(): boolean {
     return this.active;
+  }
+
+  isSelectTool(): boolean {
+    return this.tool === 'select';
   }
 
   getCursor(): string {
@@ -216,6 +245,8 @@ export class SketchController {
       arc: 'sketch.tool.arc',
       polygon: 'sketch.tool.polygon',
       fillet: 'sketch.tool.fillet',
+      chamfer: 'sketch.tool.chamfer',
+      roundedRect: 'sketch.tool.roundedRect',
       trim: 'sketch.tool.trim',
       mirror: 'sketch.tool.mirror',
       point: 'sketch.tool.point',
@@ -364,9 +395,10 @@ export class SketchController {
       : 2 * this.points.length + this.circles.length + 3 * this.arcs.length;
   }
 
-  private getScaleMm(): number {
+  private getScaleMm(axis: 'x' | 'y' = 'x'): number {
     const ws = this.viewer.getWorldScale();
-    return ws.sx > 0 && ws.sx !== 1 ? ws.sx : 1;
+    const scale = axis === 'y' ? ws.sy : ws.sx;
+    return scale > 0 ? scale : 1;
   }
 
   /** Update cursor position (canvas-relative CSS px) for live rubber-band preview & hover highlight. */
@@ -678,11 +710,11 @@ export class SketchController {
       return true;
     }
     if (e.key === 'g' || e.key === 'G') {
-      this.setTool('polygon');
+      this.setTool(e.shiftKey ? 'roundedRect' : 'polygon');
       return true;
     }
     if (e.key === 'f' || e.key === 'F') {
-      this.setTool('fillet');
+      this.setTool(e.shiftKey ? 'chamfer' : 'fillet');
       return true;
     }
     if (e.key === 't' || e.key === 'T') {
@@ -1037,6 +1069,10 @@ export class SketchController {
         }
       }
     }
+    if (this.guideSnapEnabled && this.snapToGuide) {
+      const guideSnap = this.snapToGuide({ x, y }, 8);
+      if (guideSnap.snapped) return { x: guideSnap.x, y: guideSnap.y };
+    }
     if (this.rasterSnapEnabled && this.grayCache) {
       const rSnap = this.snapRasterPoint({ x, y }, altKey);
       if (rSnap.snapped) return { x: rSnap.x, y: rSnap.y };
@@ -1194,6 +1230,20 @@ export class SketchController {
         const snapped = this.snapInputCoord(r.x, r.y, this.lastMouse?.altKey ?? false);
         this.viewer.setOrigin(snapped.x, snapped.y);
         return true;
+      }
+
+      for (const badge of this.dimBadgeRects) {
+        if (
+          pScreen.x >= badge.x &&
+          pScreen.x <= badge.x + badge.w &&
+          pScreen.y >= badge.y &&
+          pScreen.y <= badge.y + badge.h
+        ) {
+          this.editingConstraintIdx = badge.cIdx;
+          this.render();
+          this.viewer.requestRender();
+          return true;
+        }
       }
 
       const hitPt = this.findNearPoint(r.x, r.y, 13);
@@ -1643,13 +1693,14 @@ export class SketchController {
       return true;
     }
 
-    if (this.tool === 'fillet') {
+    if (this.tool === 'fillet' || this.tool === 'chamfer') {
       const cornerPt = this.findNearPoint(rawR.x, rawR.y, 16);
       if (cornerPt) {
         const connected = this.lines.filter((l) => l.a === cornerPt.id || l.b === cornerPt.id);
         if (connected.length >= 2) {
           this.pushUndo();
-          this.createCornerFillet(cornerPt, connected[0], connected[1]);
+          if (this.tool === 'fillet') this.createCornerFillet(cornerPt, connected[0], connected[1]);
+          else this.createCornerChamfer(cornerPt, connected[0], connected[1]);
           void this.solveSilent();
           this.render();
           this.viewer.requestRender();
@@ -1849,6 +1900,28 @@ export class SketchController {
             this.constraints.push({ Horizontal: l3 });
             this.constraints.push({ Vertical: l4 });
           }
+        }
+        this.pending = null;
+        void this.solveSilent();
+        this.render();
+        this.onStatus(t(this.locale, 'status.ready'));
+        this.notifyDof();
+        this.onChange?.();
+      }
+      this.viewer.requestRender();
+      return true;
+    }
+
+    if (this.tool === 'roundedRect') {
+      if (!this.pending) {
+        this.pending = { x: r.x, y: r.y };
+        this.onStatus(t(this.locale, 'sketch.hint'));
+      } else {
+        const x0 = this.pending.x;
+        const y0 = this.pending.y;
+        if (Math.abs(r.x - x0) > 1 && Math.abs(r.y - y0) > 1) {
+          this.pushUndo();
+          this.createRoundedRectangle(x0, y0, r.x, r.y, altKey);
         }
         this.pending = null;
         void this.solveSilent();
@@ -2259,53 +2332,136 @@ export class SketchController {
     if (!p1 || !p2) return;
     const len1 = Math.hypot(p1.x - corner.x, p1.y - corner.y);
     const len2 = Math.hypot(p2.x - corner.x, p2.y - corner.y);
-    const setback = Math.min(len1, len2) * 0.25;
-    if (setback < 1) return;
-
     const u1x = (p1.x - corner.x) / len1;
     const u1y = (p1.y - corner.y) / len1;
     const u2x = (p2.x - corner.x) / len2;
     const u2y = (p2.y - corner.y) / len2;
+    const halfAngle = Math.acos(Math.max(-1, Math.min(1, u1x * u2x + u1y * u2y))) / 2;
+    const defaultRadius = Math.min(len1, len2) * 0.25 * Math.tan(halfAngle);
+    const radius = this.filletRadiusMm === null ? defaultRadius : this.filletRadiusMm / this.getScaleMm();
+    const geometry = cornerFilletGeometry(corner, p1, p2, radius);
+    if (!geometry || Math.hypot(geometry.first.x - corner.x, geometry.first.y - corner.y) > len1 ||
+      Math.hypot(geometry.second.x - corner.x, geometry.second.y - corner.y) > len2) {
+      this.onStatus(t(this.locale, 'sketch.fillet.invalid'), true);
+      return;
+    }
 
-    const t1 = this.getOrCreatePoint(corner.x + u1x * setback, corner.y + u1y * setback, true, true);
-    const t2 = this.getOrCreatePoint(corner.x + u2x * setback, corner.y + u2y * setback, true, true);
-    if (l1.a === corner.id) l1.a = t1.id;
-    else l1.b = t1.id;
-    if (l2.a === corner.id) l2.a = t2.id;
-    else l2.b = t2.id;
+    for (const point of [p1, p2, corner]) this.setPointFixedToRaster(point.id, point.x, point.y);
+    const first = this.getOrCreatePoint(geometry.first.x, geometry.first.y, true, true);
+    const second = this.getOrCreatePoint(geometry.second.x, geometry.second.y, true, true);
+    if (l1.a === corner.id) l1.a = first.id;
+    else l1.b = first.id;
+    if (l2.a === corner.id) l2.a = second.id;
+    else l2.b = second.id;
 
-    const bx = u1x + u2x;
-    const by = u1y + u2y;
-    const bLen = Math.hypot(bx, by) || 1;
-    const halfAngle = Math.acos(Math.max(-0.99, Math.min(0.99, u1x * u2x + u1y * u2y))) / 2;
-    const rad = setback * Math.tan(halfAngle);
-    const centerDist = setback / Math.max(0.1, Math.cos(halfAngle));
-    const centerPt = this.getOrCreatePoint(
-      corner.x + (bx / bLen) * centerDist,
-      corner.y + (by / bLen) * centerDist,
-      true,
-      true,
-    );
-    const a1 = Math.atan2(t1.y - centerPt.y, t1.x - centerPt.x);
-    const a2 = Math.atan2(t2.y - centerPt.y, t2.x - centerPt.x);
-    const twoPi = Math.PI * 2;
-    const sweep12 = ((a2 - a1) % twoPi + twoPi) % twoPi;
-    const useA1Start = sweep12 <= Math.PI;
+    const center = this.getOrCreatePoint(geometry.center.x, geometry.center.y, true, true);
     const arcId = this.nextArcId();
     this.arcs.push({
       id: arcId,
-      center: centerPt.id,
-      radius: Math.max(1, rad),
-      start: useA1Start ? a1 : a2,
-      end: useA1Start ? a1 + sweep12 : a2 + (twoPi - sweep12),
-      startPt: useA1Start ? t1.id : t2.id,
-      endPt: useA1Start ? t2.id : t1.id,
+      center: center.id,
+      radius,
+      start: geometry.start,
+      end: geometry.end,
+      startPt: geometry.startWithFirst ? first.id : second.id,
+      endPt: geometry.startWithFirst ? second.id : first.id,
       construction: false,
     });
-    this.constraints.push({ PointOnArc: [t1.id, arcId] });
-    this.constraints.push({ PointOnArc: [t2.id, arcId] });
+    this.constraints.push({ ArcRadius: [arcId, radius] });
+    this.constraints.push({ PointOnArc: [first.id, arcId] });
+    this.constraints.push({ PointOnArc: [second.id, arcId] });
     this.constraints.push({ TangentLineArc: [l1.id, arcId] });
     this.constraints.push({ TangentLineArc: [l2.id, arcId] });
+  }
+
+  private createCornerChamfer(
+    corner: SavedSketchPoint,
+    l1: SavedSketchLine,
+    l2: SavedSketchLine,
+  ): void {
+    const p1 = this.points.find((p) => p.id === (l1.a === corner.id ? l1.b : l1.a));
+    const p2 = this.points.find((p) => p.id === (l2.a === corner.id ? l2.b : l2.a));
+    if (!p1 || !p2) return;
+    const firstDistance = this.chamferFirstMm / this.getScaleMm();
+    const secondDistance = this.chamferSecondMm / this.getScaleMm();
+    const geometry = cornerChamferGeometry(corner, p1, p2, firstDistance, secondDistance);
+    if (!geometry) {
+      this.onStatus(t(this.locale, 'sketch.fillet.invalid'), true);
+      return;
+    }
+
+    for (const point of [p1, p2, corner]) this.setPointFixedToRaster(point.id, point.x, point.y);
+    const first = this.getOrCreatePoint(geometry.first.x, geometry.first.y, true, true);
+    const second = this.getOrCreatePoint(geometry.second.x, geometry.second.y, true, true);
+    if (l1.a === corner.id) l1.a = first.id;
+    else l1.b = first.id;
+    if (l2.a === corner.id) l2.a = second.id;
+    else l2.b = second.id;
+    this.lines.push({ id: this.nextLineId(), a: first.id, b: second.id, construction: false });
+  }
+
+  private createRoundedRectangle(x0: number, y0: number, x1: number, y1: number, altKey: boolean): void {
+    const xMin = Math.min(x0, x1);
+    const xMax = Math.max(x0, x1);
+    const yMin = Math.min(y0, y1);
+    const yMax = Math.max(y0, y1);
+    const width = xMax - xMin;
+    const height = yMax - yMin;
+    const requested = this.roundedRectRadiusMm === null
+      ? Math.min(width, height) * 0.1
+      : this.roundedRectRadiusMm / this.getScaleMm();
+    const radius = Math.max(1, Math.min(requested, width / 2, height / 2));
+
+    const tlLeft = this.getOrCreatePoint(xMin, yMin + radius, true, true);
+    const tlTop = this.getOrCreatePoint(xMin + radius, yMin, true, true);
+    const trTop = this.getOrCreatePoint(xMax - radius, yMin, true, true);
+    const trRight = this.getOrCreatePoint(xMax, yMin + radius, true, true);
+    const brRight = this.getOrCreatePoint(xMax, yMax - radius, true, true);
+    const brBottom = this.getOrCreatePoint(xMax - radius, yMax, true, true);
+    const blBottom = this.getOrCreatePoint(xMin + radius, yMax, true, true);
+    const blLeft = this.getOrCreatePoint(xMin, yMax - radius, true, true);
+    const tlCenter = this.getOrCreatePoint(xMin + radius, yMin + radius, true, true);
+    const trCenter = this.getOrCreatePoint(xMax - radius, yMin + radius, true, true);
+    const brCenter = this.getOrCreatePoint(xMax - radius, yMax - radius, true, true);
+    const blCenter = this.getOrCreatePoint(xMin + radius, yMax - radius, true, true);
+
+    const top = this.nextLineId();
+    const right = top + 1;
+    const bottom = top + 2;
+    const left = top + 3;
+    this.lines.push(
+      { id: top, a: tlTop.id, b: trTop.id, construction: this.constructionMode },
+      { id: right, a: trRight.id, b: brRight.id, construction: this.constructionMode },
+      { id: bottom, a: brBottom.id, b: blBottom.id, construction: this.constructionMode },
+      { id: left, a: blLeft.id, b: tlLeft.id, construction: this.constructionMode },
+    );
+    if (this.autoConstraints && !altKey) {
+      this.constraints.push({ Horizontal: top }, { Vertical: right }, { Horizontal: bottom }, { Vertical: left });
+    }
+
+    const corners = [
+      { center: tlCenter, startPt: tlLeft, endPt: tlTop, start: Math.PI, end: Math.PI * 1.5, lines: [left, top] },
+      { center: trCenter, startPt: trTop, endPt: trRight, start: Math.PI * 1.5, end: Math.PI * 2, lines: [top, right] },
+      { center: brCenter, startPt: brRight, endPt: brBottom, start: 0, end: Math.PI / 2, lines: [right, bottom] },
+      { center: blCenter, startPt: blBottom, endPt: blLeft, start: Math.PI / 2, end: Math.PI, lines: [bottom, left] },
+    ];
+    for (const corner of corners) {
+      const arcId = this.nextArcId();
+      this.arcs.push({
+        id: arcId,
+        center: corner.center.id,
+        radius,
+        start: corner.start,
+        end: corner.end,
+        startPt: corner.startPt.id,
+        endPt: corner.endPt.id,
+        construction: this.constructionMode,
+      });
+      this.constraints.push({ ArcRadius: [arcId, radius] });
+      this.constraints.push({ PointOnArc: [corner.startPt.id, arcId] });
+      this.constraints.push({ PointOnArc: [corner.endPt.id, arcId] });
+      this.constraints.push({ TangentLineArc: [corner.lines[0], arcId] });
+      this.constraints.push({ TangentLineArc: [corner.lines[1], arcId] });
+    }
   }
 
   private trimLineAtClick(target: SavedSketchLine, clickX: number, clickY: number): void {
@@ -2556,7 +2712,7 @@ export class SketchController {
       ctx.setLineDash([]);
       ctx.fillStyle = crossing ? '#15803d' : '#0369a1';
       ctx.font = 'bold 11px Arial, sans-serif';
-      ctx.fillText(crossing ? 'Crossing Select' : 'Window Select', rx + 6, Math.max(14, ry - 5));
+      ctx.fillText(crossing ? 'Presijecajući izbor' : 'Izbor okvirom', rx + 6, Math.max(14, ry - 5));
       ctx.restore();
     }
 
@@ -2581,7 +2737,7 @@ export class SketchController {
       if (this.activeConstraintTool) {
         ctx.save();
         ctx.fillStyle = 'rgba(15, 23, 42, 0.86)';
-        const badgeText = `Constraint: ${this.activeConstraintTool} (click entities · Esc to exit)`;
+        const badgeText = `Ograničenje: ${this.activeConstraintTool} (klikni elemente · Esc za izlaz)`;
         const bw = ctx.measureText(badgeText).width + 14;
         ctx.fillRect(this.lastMouse.x + 14, this.lastMouse.y + 14, bw, 22);
         ctx.fillStyle = '#38bdf8';
@@ -2619,7 +2775,7 @@ export class SketchController {
           ctx.stroke();
           ctx.fillStyle = success;
           ctx.font = 'bold 11px Arial, sans-serif';
-          ctx.fillText('● Coinc', sp.x + 11, sp.y - 8);
+          ctx.fillText('● Podud.', sp.x + 11, sp.y - 8);
           ctx.restore();
         }
 
@@ -2688,12 +2844,12 @@ export class SketchController {
               targetScreen.x + 10,
               targetScreen.y - 10,
             );
-          } else if (this.tool === 'rect') {
+          } else if (this.tool === 'rect' || this.tool === 'roundedRect') {
             const w = targetScreen.x - startScreen.x;
             const h = targetScreen.y - startScreen.y;
             ctx.strokeRect(startScreen.x, startScreen.y, w, h);
             const rw = Math.abs(targetX - pendX) * scaleMm;
-            const rh = Math.abs(targetY - pendY) * scaleMm;
+            const rh = Math.abs(targetY - pendY) * this.getScaleMm('y');
             ctx.fillText(
               `${rw.toFixed(1)} × ${rh.toFixed(1)} ${unitLabel}`,
               targetScreen.x + 10,
@@ -2779,7 +2935,7 @@ export class SketchController {
             ctx.stroke();
             const chord = Math.hypot(targetX - this.arc3PtPending.x1, targetY - this.arc3PtPending.y1);
             ctx.fillText(
-              `Chord ${(chord * scaleMm).toFixed(1)} ${unitLabel}`,
+              `Tetiva ${(chord * scaleMm).toFixed(1)} ${unitLabel}`,
               targetScreen.x + 10,
               targetScreen.y - 10,
             );
@@ -2908,7 +3064,6 @@ export class SketchController {
     drivingColor: string,
     refColor: string,
   ): void {
-    const scaleMm = this.getScaleMm();
     this.dimBadgeRects = [];
     ctx.save();
     ctx.font = 'bold 11px Arial, sans-serif';
@@ -2994,7 +3149,7 @@ export class SketchController {
         if (!p1 || !p2) return;
         const a = to(p1.x, p1.y);
         const b = to(p2.x, p2.y);
-        const mmVal = (arr[2] * scaleMm).toFixed(1);
+        const mmVal = (this.dimensionDisplayValue(c, idx) ?? 0).toFixed(1);
         const prefix = key === 'HorizontalDistance' ? 'ΔX ' : key === 'VerticalDistance' ? 'ΔY ' : '';
         ctx.strokeStyle = dimColor;
         ctx.lineWidth = 1;
@@ -3004,14 +3159,20 @@ export class SketchController {
         ctx.lineTo(b.x, b.y - 18);
         ctx.stroke();
         ctx.setLineDash([]);
-        drawBadge((a.x + b.x) / 2, (a.y + b.y) / 2 - 22, `${prefix}${mmVal} mm`, dimColor, idx);
+        drawBadge(
+          (a.x + b.x) / 2,
+          (a.y + b.y) / 2 - 22,
+          `${prefix}${mmVal} mm`,
+          dimColor,
+          isRef ? undefined : idx,
+        );
       } else if (key === 'DistancePointLine') {
         const arr = val as number[];
         const pt = this.points.find((p) => p.id === arr[0]);
         if (!pt) return;
         const s = to(pt.x, pt.y);
-        const mmVal = (arr[2] * scaleMm).toFixed(1);
-        drawBadge(s.x + 18, s.y - 18, `${mmVal} mm`, dimColor, idx);
+        const mmVal = (this.dimensionDisplayValue(c, idx) ?? 0).toFixed(1);
+        drawBadge(s.x + 18, s.y - 18, `${mmVal} mm`, dimColor, isRef ? undefined : idx);
       } else if (key === 'LineLength') {
         const arr = val as number[];
         const l = this.lines.find((x) => x.id === arr[0]);
@@ -3021,34 +3182,94 @@ export class SketchController {
         if (!pa || !pb) return;
         const a = to(pa.x, pa.y);
         const b = to(pb.x, pb.y);
-        const mmVal = (arr[1] * scaleMm).toFixed(1);
-        drawBadge((a.x + b.x) / 2, (a.y + b.y) / 2 - 22, `${mmVal} mm`, dimColor, idx);
+        const mmVal = (this.dimensionDisplayValue(c, idx) ?? 0).toFixed(1);
+        drawBadge(
+          (a.x + b.x) / 2,
+          (a.y + b.y) / 2 - 22,
+          `${mmVal} mm`,
+          dimColor,
+          isRef ? undefined : idx,
+        );
       } else if (key === 'Radius' || key === 'Diameter' || key === 'ArcRadius') {
         const arr = val as number[];
-        const c =
+        const entity =
           key === 'ArcRadius'
             ? this.arcs.find((x) => x.id === arr[0])
             : this.circles.find((x) => x.id === arr[0]);
-        if (!c) return;
-        const center = this.points.find((p) => p.id === c.center);
+        if (!entity) return;
+        const center = this.points.find((p) => p.id === entity.center);
         if (!center) return;
         const sc = to(center.x, center.y);
-        const mmVal = (arr[1] * scaleMm).toFixed(1);
+        const mmVal = (this.dimensionDisplayValue(c, idx) ?? 0).toFixed(1);
         const prefix = key === 'Diameter' ? '⌀ ' : 'R ';
-        drawBadge(sc.x + 24, sc.y - 18, `${prefix}${mmVal} mm`, dimColor, idx);
+        drawBadge(sc.x + 24, sc.y - 18, `${prefix}${mmVal} mm`, dimColor, isRef ? undefined : idx);
       } else if (key === 'Angle' || key === 'AngleLine') {
         const arr = val as number[];
-        const rad = key === 'Angle' ? arr[2] : arr[1];
         const l = this.lines.find((x) => x.id === arr[0]);
         if (!l) return;
         const pa = this.points.find((p) => p.id === l.a);
         if (!pa) return;
         const sa = to(pa.x, pa.y);
-        drawBadge(sa.x + 22, sa.y - 16, `∠ ${((rad * 180) / Math.PI).toFixed(1)}°`, dimColor, idx);
+        const degVal = (this.dimensionDisplayValue(c, idx) ?? 0).toFixed(1);
+        drawBadge(sa.x + 22, sa.y - 16, `∠ ${degVal}°`, dimColor, isRef ? undefined : idx);
       }
     });
 
     ctx.restore();
+  }
+
+  private dimensionDisplayValue(constraint: Record<string, unknown>, idx: number): number | null {
+    const key = Object.keys(constraint)[0];
+    if (!isDimensionKey(key)) return null;
+    const scale = this.viewer.getWorldScale();
+    if (this.referenceConstraints.includes(idx)) {
+      const measured = measureDimension(constraint, this.buildSolveSketch(), scale);
+      if (measured !== null) return measured;
+    }
+    const values = constraint[key];
+    if (!Array.isArray(values) || typeof values[values.length - 1] !== 'number') return null;
+    return dimensionValueFromRaster(key, values[values.length - 1], scale);
+  }
+
+  private measureSelectedDimension(action: string): number | null {
+    let constraint: Record<string, unknown> | null = null;
+    if (action === 'Distance') {
+      if (this.selectedPoints.length >= 2) {
+        constraint = { Distance: [this.selectedPoints[0], this.selectedPoints[1], 0] };
+      } else if (this.selectedPoints.length === 1 && this.selectedLines.length === 1) {
+        constraint = { DistancePointLine: [this.selectedPoints[0], this.selectedLines[0], 0] };
+      } else if (this.selectedLines.length >= 1) {
+        constraint = { LineLength: [this.selectedLines[0], 0] };
+      }
+    } else if (action === 'HorizontalDistance' || action === 'VerticalDistance') {
+      let p1: number | undefined;
+      let p2: number | undefined;
+      if (this.selectedPoints.length >= 2) {
+        [p1, p2] = this.selectedPoints;
+      } else if (this.selectedLines.length >= 1) {
+        const line = this.lines.find((l) => l.id === this.selectedLines[0]);
+        if (line) [p1, p2] = [line.a, line.b];
+      }
+      if (p1 !== undefined && p2 !== undefined) {
+        constraint = action === 'HorizontalDistance'
+          ? { HorizontalDistance: [p1, p2, 0] }
+          : { VerticalDistance: [p1, p2, 0] };
+      }
+    } else if (action === 'Radius') {
+      if (this.selectedCircles.length >= 1) constraint = { Radius: [this.selectedCircles[0], 0] };
+      else if (this.selectedArcs.length >= 1) constraint = { ArcRadius: [this.selectedArcs[0], 0] };
+    } else if (action === 'Diameter' && this.selectedCircles.length >= 1) {
+      constraint = { Diameter: [this.selectedCircles[0], 0] };
+    } else if (action === 'Angle') {
+      if (this.selectedLines.length >= 2) {
+        constraint = { Angle: [this.selectedLines[0], this.selectedLines[1], 0] };
+      } else if (this.selectedLines.length === 1) {
+        constraint = { AngleLine: [this.selectedLines[0], 0] };
+      }
+    }
+    return constraint
+      ? measureDimension(constraint, this.buildSolveSketch(), this.viewer.getWorldScale())
+      : null;
   }
 
   private applyParams(params: number[]): void {
@@ -3087,7 +3308,7 @@ export class SketchController {
     try {
       const sketch = this.buildSolveSketch();
       const result = await solveSketch(sketch, true);
-      this.applyParams(result.params);
+      if (result.converged) this.applyParams(result.params);
       this.lastSolve = result;
       this.notifyDof();
     } catch {
@@ -3105,7 +3326,7 @@ export class SketchController {
     try {
       const sketch = this.buildSolveSketch();
       const result = await solveSketch(sketch, false);
-      this.applyParams(result.params);
+      if (result.converged) this.applyParams(result.params);
       this.lastSolve = result;
       this.resultText = result.converged
         ? tf(this.locale, 'sketch.result', { r: result.max_residual.toExponential(2) })
@@ -3240,28 +3461,24 @@ export class SketchController {
     this.viewer.requestRender();
   }
 
-  async exportDxf(): Promise<void> {
-    const dxf = await exportSketchDxf(this.buildWorldSketch());
+  async exportDxf(texts: SavedSketchText[] = this.textProvider()): Promise<void> {
+    const dxf = await exportSketchDxf(this.buildPartSketch(texts));
     this.downloadText(dxf, 'sketch.dxf', 'application/dxf');
     document.documentElement.dataset.exported = 'dxf';
   }
 
   async exportSvg(): Promise<void> {
-    const svg = await exportSketchSvg(this.buildWorldSketch());
+    const svg = await exportSketchSvg(this.buildPartSketch());
     this.downloadText(svg, 'sketch.svg', 'image/svg+xml');
     document.documentElement.dataset.exported = 'svg';
   }
 
-  /**
-   * Build the sketch in CAD world coordinates (mm, y-up) for export. The editor
-   * stores geometry in raster pixels (y-down); the DXF/SVG exporters assume mm
-   * y-up, so this applies the calibration scale/flip/origin and arc mirroring.
-   */
-  private buildWorldSketch(): SavedSketchData {
-    return sketchToWorld(
-      this.buildSketch(),
+  private buildPartSketch(texts: SavedSketchText[] = []): SavedSketchData {
+    return sketchToPart(
+      { ...this.buildSketch(), texts },
       this.viewer.getWorldScale(),
       this.viewer.getOrigin(),
+      this.viewer.getRasterTransform(),
     );
   }
 
@@ -3407,16 +3624,24 @@ export class SketchController {
   }
 
   applyConstraintAction(action: string, customValueMmOrDeg?: number): void {
-    const scaleMm = this.getScaleMm();
+    const scale = this.viewer.getWorldScale();
     const valInput = this.panel.querySelector<HTMLInputElement>('#sketch-c-val');
-    const rawVal =
-      customValueMmOrDeg !== undefined
-        ? customValueMmOrDeg
-        : valInput
-          ? Number(valInput.value)
-          : 50;
+    const explicitValue = customValueMmOrDeg !== undefined
+      ? customValueMmOrDeg
+      : valInput?.value.trim()
+        ? Number(valInput.value)
+        : undefined;
 
     this.pushUndo();
+    const dimensionValue = (key: string): number | null => {
+      if (!isDimensionKey(key)) return null;
+      const value = explicitValue ?? this.measureSelectedDimension(key);
+      return value !== null && isValidDimensionValue(key, value) ? value : null;
+    };
+    const rejectDimension = (): void => {
+      this.undoStack.pop();
+      this.onStatus(t(this.locale, 'sketch.invalidDimension'), true);
+    };
     let added = false;
 
     if (action === 'Horizontal') {
@@ -3575,7 +3800,12 @@ export class SketchController {
         }
       }
     } else if (action === 'Distance') {
-      const dInternal = rawVal / scaleMm;
+      const rawValue = dimensionValue(action);
+      if (rawValue === null) {
+        rejectDimension();
+        return;
+      }
+      const dInternal = dimensionValueToRaster('Distance', rawValue, scale);
       if (this.selectedPoints.length >= 2) {
         this.constraints.push({
           Distance: [this.selectedPoints[0], this.selectedPoints[1], dInternal],
@@ -3591,7 +3821,12 @@ export class SketchController {
         added = true;
       }
     } else if (action === 'HorizontalDistance' || action === 'VerticalDistance') {
-      const dInternal = rawVal / scaleMm;
+      const rawValue = dimensionValue(action);
+      if (rawValue === null) {
+        rejectDimension();
+        return;
+      }
+      const dInternal = dimensionValueToRaster(action, rawValue, scale);
       let p1: number | undefined;
       let p2: number | undefined;
       if (this.selectedPoints.length >= 2) {
@@ -3612,7 +3847,12 @@ export class SketchController {
         added = true;
       }
     } else if (action === 'Radius') {
-      const rInternal = rawVal / scaleMm;
+      const rawValue = dimensionValue(action);
+      if (rawValue === null) {
+        rejectDimension();
+        return;
+      }
+      const rInternal = dimensionValueToRaster('Radius', rawValue, scale);
       if (this.selectedCircles.length >= 1) {
         this.constraints.push({ Radius: [this.selectedCircles[0], rInternal] });
         added = true;
@@ -3621,13 +3861,23 @@ export class SketchController {
         added = true;
       }
     } else if (action === 'Diameter') {
-      const dInternal = rawVal / scaleMm;
+      const rawValue = dimensionValue(action);
+      if (rawValue === null) {
+        rejectDimension();
+        return;
+      }
+      const dInternal = dimensionValueToRaster('Diameter', rawValue, scale);
       if (this.selectedCircles.length >= 1) {
         this.constraints.push({ Diameter: [this.selectedCircles[0], dInternal] });
         added = true;
       }
     } else if (action === 'Angle') {
-      const rad = (rawVal * Math.PI) / 180;
+      const rawValue = dimensionValue(action);
+      if (rawValue === null) {
+        rejectDimension();
+        return;
+      }
+      const rad = dimensionValueToRaster('Angle', rawValue, scale);
       if (this.selectedLines.length >= 2) {
         this.constraints.push({ Angle: [this.selectedLines[0], this.selectedLines[1], rad] });
         added = true;
@@ -3647,85 +3897,127 @@ export class SketchController {
   }
 
   private addConstraintFromUi(type: string, e1: number, e2: number, val: number): void {
-    const scaleMm = this.getScaleMm();
-    this.pushUndo();
+    const scale = this.viewer.getWorldScale();
+    let constraint: Record<string, unknown>;
     switch (type) {
-      case 'Horizontal':
-        this.constraints.push({ Horizontal: e1 });
-        break;
-      case 'Vertical':
-        this.constraints.push({ Vertical: e1 });
-        break;
-      case 'HorizontalPoints':
-        this.constraints.push({ HorizontalPoints: [e1, e2] });
-        break;
-      case 'VerticalPoints':
-        this.constraints.push({ VerticalPoints: [e1, e2] });
-        break;
-      case 'Coincident':
-        this.constraints.push({ Coincident: [e1, e2] });
-        break;
-      case 'PointOnLine':
-        this.constraints.push({ PointOnLine: [e1, e2] });
-        break;
-      case 'PointOnCircle':
-        this.constraints.push({ PointOnCircle: [e1, e2] });
-        break;
-      case 'Parallel':
-        this.constraints.push({ Parallel: [e1, e2] });
-        break;
-      case 'Perpendicular':
-        this.constraints.push({ Perpendicular: [e1, e2] });
-        break;
-      case 'TangentLineCircle':
-        this.constraints.push({ TangentLineCircle: [e1, e2] });
-        break;
-      case 'EqualLength':
-        this.constraints.push({ EqualLength: [e1, e2] });
-        break;
-      case 'EqualRadius':
-        this.constraints.push({ EqualRadius: [e1, e2] });
-        break;
-      case 'LineLength':
-        this.constraints.push({ LineLength: [e1, val / scaleMm] });
-        break;
-      case 'Distance':
-        this.constraints.push({ Distance: [e1, e2, val / scaleMm] });
-        break;
+      case 'Horizontal': constraint = { Horizontal: e1 }; break;
+      case 'Vertical': constraint = { Vertical: e1 }; break;
+      case 'HorizontalPoints': constraint = { HorizontalPoints: [e1, e2] }; break;
+      case 'VerticalPoints': constraint = { VerticalPoints: [e1, e2] }; break;
+      case 'Coincident': constraint = { Coincident: [e1, e2] }; break;
+      case 'PointOnLine': constraint = { PointOnLine: [e1, e2] }; break;
+      case 'PointOnCircle': constraint = { PointOnCircle: [e1, e2] }; break;
+      case 'Parallel': constraint = { Parallel: [e1, e2] }; break;
+      case 'Perpendicular': constraint = { Perpendicular: [e1, e2] }; break;
+      case 'TangentLineCircle': constraint = { TangentLineCircle: [e1, e2] }; break;
+      case 'EqualLength': constraint = { EqualLength: [e1, e2] }; break;
+      case 'EqualRadius': constraint = { EqualRadius: [e1, e2] }; break;
+      case 'LineLength': constraint = { LineLength: [e1, dimensionValueToRaster(type, val, scale)] }; break;
+      case 'Distance': constraint = { Distance: [e1, e2, dimensionValueToRaster(type, val, scale)] }; break;
       case 'DistancePointLine':
-        this.constraints.push({ DistancePointLine: [e1, e2, val / scaleMm] });
+        constraint = { DistancePointLine: [e1, e2, dimensionValueToRaster(type, val, scale)] };
         break;
       case 'HorizontalDistance':
-        this.constraints.push({ HorizontalDistance: [e1, e2, val / scaleMm] });
+        constraint = { HorizontalDistance: [e1, e2, dimensionValueToRaster(type, val, scale)] };
         break;
       case 'VerticalDistance':
-        this.constraints.push({ VerticalDistance: [e1, e2, val / scaleMm] });
+        constraint = { VerticalDistance: [e1, e2, dimensionValueToRaster(type, val, scale)] };
         break;
-      case 'Radius':
-        this.constraints.push({ Radius: [e1, val / scaleMm] });
-        break;
-      case 'Diameter':
-        this.constraints.push({ Diameter: [e1, val / scaleMm] });
-        break;
-      case 'Angle':
-        this.constraints.push({ Angle: [e1, e2, (val * Math.PI) / 180] });
-        break;
-      case 'AngleLine':
-        this.constraints.push({ AngleLine: [e1, (val * Math.PI) / 180] });
-        break;
-      case 'Midpoint':
-        this.constraints.push({ Midpoint: [e1, e2] });
-        break;
-      case 'Collinear':
-        this.constraints.push({ Collinear: [e1, e2] });
-        break;
+      case 'Radius': constraint = { Radius: [e1, dimensionValueToRaster(type, val, scale)] }; break;
+      case 'Diameter': constraint = { Diameter: [e1, dimensionValueToRaster(type, val, scale)] }; break;
+      case 'Angle': constraint = { Angle: [e1, e2, dimensionValueToRaster(type, val, scale)] }; break;
+      case 'AngleLine': constraint = { AngleLine: [e1, dimensionValueToRaster(type, val, scale)] }; break;
+      case 'Midpoint': constraint = { Midpoint: [e1, e2] }; break;
+      case 'Collinear': constraint = { Collinear: [e1, e2] }; break;
       case 'FixedPoint': {
         const pt = this.points.find((p) => p.id === e1);
-        this.constraints.push({ FixedPoint: [e1, pt ? pt.x : 0, pt ? pt.y : 0] });
+        constraint = { FixedPoint: [e1, pt ? pt.x : 0, pt ? pt.y : 0] };
         break;
       }
+      default:
+        this.onStatus(t(this.locale, 'sketch.selectForConstraint'), true);
+        return;
     }
+
+    if (isDimensionKey(type) && !isValidDimensionValue(type, val)) {
+      this.onStatus(t(this.locale, 'sketch.invalidDimension'), true);
+      return;
+    }
+    const hasPoint = (id: number) => this.points.some((p) => p.id === id);
+    const hasLine = (id: number) => this.lines.some((l) => l.id === id);
+    const hasCircle = (id: number) => this.circles.some((c) => c.id === id);
+    const referencesValid = (() => {
+      switch (type) {
+        case 'Horizontal': case 'Vertical': case 'LineLength': case 'AngleLine':
+          return hasLine(e1);
+        case 'HorizontalPoints': case 'VerticalPoints': case 'Coincident':
+        case 'Distance': case 'HorizontalDistance': case 'VerticalDistance':
+          return hasPoint(e1) && hasPoint(e2);
+        case 'PointOnLine': case 'DistancePointLine': case 'Midpoint':
+          return hasPoint(e1) && hasLine(e2);
+        case 'PointOnCircle':
+          return hasPoint(e1) && hasCircle(e2);
+        case 'Parallel': case 'Perpendicular': case 'EqualLength': case 'Collinear': case 'Angle':
+          return hasLine(e1) && hasLine(e2);
+        case 'TangentLineCircle':
+          return hasLine(e1) && hasCircle(e2);
+        case 'EqualRadius':
+          return hasCircle(e1) && hasCircle(e2);
+        case 'Radius': case 'Diameter':
+          return hasCircle(e1);
+        case 'FixedPoint':
+          return hasPoint(e1);
+        default:
+          return true;
+      }
+    })();
+    if (!referencesValid) {
+      this.onStatus(t(this.locale, 'sketch.invalidConstraintReference'), true);
+      return;
+    }
+
+    this.pushUndo();
+    this.constraints.push(constraint);
     void this.solve();
+  }
+
+  private updateDimensionFromEditor(): void {
+    const idx = this.editingConstraintIdx;
+    if (idx === null) return;
+    const constraint = this.constraints[idx];
+    const key = constraint ? Object.keys(constraint)[0] : undefined;
+    const input = this.panel.querySelector<HTMLInputElement>('#sketch-dimension-value');
+    if (!constraint || !key || !isDimensionKey(key) || !input) return;
+    const value = Number(input.value);
+    if (!isValidDimensionValue(key, value)) {
+      this.onStatus(t(this.locale, 'sketch.invalidDimension'), true);
+      input.focus();
+      return;
+    }
+    const values = constraint[key];
+    if (!Array.isArray(values) || values.length === 0) return;
+
+    this.pushUndo();
+    const nextValues = [...values];
+    nextValues[nextValues.length - 1] = dimensionValueToRaster(
+      key,
+      value,
+      this.viewer.getWorldScale(),
+    );
+    this.constraints[idx] = { [key]: nextValues };
+    this.editingConstraintIdx = null;
+    void this.solve();
+  }
+
+  private removeConstraintAt(idx: number): void {
+    this.constraints.splice(idx, 1);
+    this.referenceConstraints = this.referenceConstraints
+      .filter((i) => i !== idx)
+      .map((i) => (i > idx ? i - 1 : i));
+    if (this.editingConstraintIdx === idx) this.editingConstraintIdx = null;
+    else if (this.editingConstraintIdx !== null && this.editingConstraintIdx > idx) {
+      this.editingConstraintIdx -= 1;
+    }
   }
 
   private render(): void {
@@ -3752,19 +4044,40 @@ export class SketchController {
 
     const constraintsHtml = this.constraints
       .map((c, idx) => {
-        const key = Object.keys(c)[0] ?? 'Constraint';
+        const key = Object.keys(c)[0] ?? 'Ograničenje';
         const val = JSON.stringify((c as Record<string, unknown>)[key]);
         const isRef = this.referenceConstraints.includes(idx);
         const isConflict = conflicting.includes(idx);
         const isRedundant = redundant.includes(idx);
         return `
           <li class="cal-segment${isConflict ? ' segment-conflict' : isRedundant ? ' segment-redundant' : ''}">
-            <input type="checkbox" class="sketch-c-ref" data-index="${idx}" ${!isRef ? 'checked' : ''} title="Driving" />
+            <input type="checkbox" class="sketch-c-ref" data-index="${idx}" ${!isRef ? 'checked' : ''} title="Aktivno" />
             <span class="cal-label">#${idx + 1} ${escapeHtml(key)} ${escapeHtml(val)}</span>
-            <button class="sketch-c-del tool-btn cal-delete" type="button" data-index="${idx}" aria-label="Delete">×</button>
+            <button class="sketch-c-del tool-btn cal-delete" type="button" data-index="${idx}" aria-label="Obriši">×</button>
           </li>`;
       })
       .join('');
+
+    const dimensionEditorHtml = (() => {
+      const idx = this.editingConstraintIdx;
+      if (idx === null) return '';
+      const constraint = this.constraints[idx];
+      const key = constraint ? Object.keys(constraint)[0] : undefined;
+      if (!constraint || !key || !isDimensionKey(key) || this.referenceConstraints.includes(idx)) return '';
+      const value = this.dimensionDisplayValue(constraint, idx);
+      if (value === null) return '';
+      const unit = key === 'Angle' || key === 'AngleLine' ? '°' : 'mm';
+      const label = tf(locale, 'sketch.editDimension', { index: idx + 1, unit });
+      return `
+        <div class="sketch-toolbar-box sketch-dimension-editor">
+          <label class="cal-label" for="sketch-dimension-value">${escapeHtml(label)}</label>
+          <div class="cal-actions">
+            <input id="sketch-dimension-value" class="cal-length" type="number" step="any" value="${value.toFixed(3)}" />
+            <button id="sketch-dimension-apply" class="btn btn-primary" type="button">${t(locale, 'calibrate.apply')}</button>
+            <button id="sketch-dimension-cancel" class="btn" type="button">${t(locale, 'account.cancel')}</button>
+          </div>
+        </div>`;
+    })();
 
     const elementsHtml = [
       ...this.lines.map(
@@ -3803,6 +4116,7 @@ export class SketchController {
         </div>
         <div class="cal-actions">
           <label class="cal-label"><input id="sketch-raster-snap" type="checkbox" ${this.rasterSnapEnabled ? 'checked' : ''} /> 🧲 Snap na raster</label>
+          <label class="cal-label"><input id="sketch-guide-snap" type="checkbox" ${this.guideSnapEnabled ? 'checked' : ''} /> 🧲 Snap na guide</label>
           <label class="cal-label"><input id="sketch-pin-raster" type="checkbox" ${this.autoPinRaster ? 'checked' : ''} /> 📌 Prikvači na raster</label>
           <label class="cal-label"><input id="sketch-loupe" type="checkbox" ${this.loupeEnabled ? 'checked' : ''} /> 🔍 8×</label>
           <label class="cal-label"><input id="sketch-construction" type="checkbox" ${this.constructionMode ? 'checked' : ''} /> ${t(locale, 'sketch.construction')}</label>
@@ -3817,6 +4131,7 @@ export class SketchController {
           <button id="sketch-tool-polyline" class="btn ${this.tool === 'polyline' ? 'btn-tool-active' : ''}" type="button" title="${t(locale, 'sketch.tool.polyline')}">Polilinija (P)</button>
           <button id="sketch-tool-line" class="btn ${this.tool === 'line' ? 'btn-tool-active' : ''}" type="button" title="${t(locale, 'sketch.tool.line')}">╱ Linija (L)</button>
           <button id="sketch-tool-rect" class="btn ${this.tool === 'rect' ? 'btn-tool-active' : ''}" type="button" title="${t(locale, 'sketch.tool.rect')}">▭ Pravougaonik (R)</button>
+          <button id="sketch-tool-rounded-rect" class="btn ${this.tool === 'roundedRect' ? 'btn-tool-active' : ''}" type="button" title="${t(locale, 'sketch.tool.roundedRect')}">▢ Zaoblj. prav.</button>
           <button id="sketch-tool-center-rect" class="btn ${this.tool === 'centerRect' ? 'btn-tool-active' : ''}" type="button" title="${t(locale, 'sketch.tool.centerRect')}">⊡ C-Prav.</button>
           <button id="sketch-tool-slot" class="btn ${this.tool === 'slot' ? 'btn-tool-active' : ''}" type="button" title="${t(locale, 'sketch.tool.slot')}">⬭ Slot (S)</button>
           <button id="sketch-tool-circle" class="btn ${this.tool === 'circle' ? 'btn-tool-active' : ''}" type="button" title="${t(locale, 'sketch.tool.circle')}">◯ Kružnica (C)</button>
@@ -3824,10 +4139,26 @@ export class SketchController {
           <button id="sketch-tool-arc3pt" class="btn ${this.tool === 'arc3pt' ? 'btn-tool-active' : ''}" type="button" title="Luk 3 tačke (Shift+A ili M)">⌒ Luk 3T</button>
           <button id="sketch-tool-polygon" class="btn ${this.tool === 'polygon' ? 'btn-tool-active' : ''}" type="button" title="${t(locale, 'sketch.tool.polygon')}">⬡ Poligon (G)</button>
           <button id="sketch-tool-fillet" class="btn ${this.tool === 'fillet' ? 'btn-tool-active' : ''}" type="button" title="${t(locale, 'sketch.tool.fillet')}">╭ Zaobljenje (F)</button>
+          <button id="sketch-tool-chamfer" class="btn ${this.tool === 'chamfer' ? 'btn-tool-active' : ''}" type="button" title="${t(locale, 'sketch.tool.chamfer')}">╱ Kosa ivica</button>
           <button id="sketch-tool-trim" class="btn ${this.tool === 'trim' ? 'btn-tool-active' : ''}" type="button" title="${t(locale, 'sketch.tool.trim')}">✂ Odseci (T)</button>
           <button id="sketch-tool-mirror" class="btn ${this.tool === 'mirror' ? 'btn-tool-active' : ''}" type="button" title="${t(locale, 'sketch.tool.mirror')}">⇋ Ogledalo</button>
           <button id="sketch-tool-point" class="btn ${this.tool === 'point' ? 'btn-tool-active' : ''}" type="button" title="${t(locale, 'sketch.tool.point')}">• Tačka (O)</button>
         </div>
+        ${this.tool === 'fillet' ? `
+          <div class="cal-actions">
+            <label class="cal-label" for="sketch-fillet-radius">${t(locale, 'sketch.fillet.radius')}</label>
+            <input id="sketch-fillet-radius" class="cal-length" type="number" min="0" step="any" placeholder="auto" value="${this.filletRadiusMm ?? ''}" />
+          </div>` : this.tool === 'chamfer' ? `
+          <div class="cal-actions">
+            <label class="cal-label" for="sketch-chamfer-d1">${t(locale, 'sketch.chamfer.d1')}</label>
+            <input id="sketch-chamfer-d1" class="cal-length" type="number" min="0" step="any" value="${this.chamferFirstMm}" />
+            <label class="cal-label" for="sketch-chamfer-d2">${t(locale, 'sketch.chamfer.d2')}</label>
+            <input id="sketch-chamfer-d2" class="cal-length" type="number" min="0" step="any" value="${this.chamferSecondMm}" />
+          </div>` : this.tool === 'roundedRect' ? `
+          <div class="cal-actions">
+            <label class="cal-label" for="sketch-rounded-radius">${t(locale, 'sketch.roundedRect.radius')}</label>
+            <input id="sketch-rounded-radius" class="cal-length" type="number" min="0" step="any" placeholder="auto" value="${this.roundedRectRadiusMm ?? ''}" />
+          </div>` : ''}
         ${
           this.pending || this.arcStartPending || this.arc3PtPending
             ? `<div class="cal-actions"><button id="sketch-finish-chain" class="btn btn-primary" type="button">${t(locale, 'sketch.finishChain')}</button></div>`
@@ -3892,7 +4223,7 @@ export class SketchController {
           </select>
           <input id="sketch-c-e1" class="cal-length w-38" type="number" value="1" aria-label="ID 1" />
           <input id="sketch-c-e2" class="cal-length w-38" type="number" value="2" aria-label="ID 2" />
-          <input id="sketch-c-val" class="cal-length w-54" type="number" value="50" aria-label="Value" />
+          <input id="sketch-c-val" class="cal-length w-54" type="number" step="any" placeholder="auto" aria-label="Vrijednost" />
           <button id="sketch-c-add" class="btn" type="button">+</button>
         </div>
       </details>
@@ -3925,16 +4256,34 @@ export class SketchController {
         </div>
       </details>
 
+      ${dimensionEditorHtml}
       ${constraintsHtml ? `<ol class="cal-segments">${constraintsHtml}</ol>` : ''}
       ${elementsHtml ? `<details class="mb-8"><summary class="cal-subhead cursor-pointer">${t(locale, 'sketch.elements')} (${this.lines.length + this.circles.length + this.arcs.length})</summary><ol class="cal-segments">${elementsHtml}</ol></details>` : ''}
 
       <p class="cal-empty" id="sketch-result">${escapeHtml(this.resultText)}</p>
     `;
 
+    const dimensionInput = this.panel.querySelector<HTMLInputElement>('#sketch-dimension-value');
+    dimensionInput?.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === 'Escape') {
+        e.preventDefault();
+        e.stopPropagation();
+        if (e.key === 'Enter') this.updateDimensionFromEditor();
+        else this.finishChain();
+      }
+    });
+    this.panel.querySelector('#sketch-dimension-apply')?.addEventListener('click', () => {
+      this.updateDimensionFromEditor();
+    });
+    this.panel.querySelector('#sketch-dimension-cancel')?.addEventListener('click', () => this.finishChain());
+    dimensionInput?.focus();
+    dimensionInput?.select();
+
     this.panel.querySelector('#sketch-close')!.addEventListener('click', () => this.deactivate());
     this.panel.querySelector('#sketch-tool-polyline')!.addEventListener('click', () => this.setTool('polyline'));
     this.panel.querySelector('#sketch-tool-line')!.addEventListener('click', () => this.setTool('line'));
     this.panel.querySelector('#sketch-tool-rect')!.addEventListener('click', () => this.setTool('rect'));
+    this.panel.querySelector('#sketch-tool-rounded-rect')!.addEventListener('click', () => this.setTool('roundedRect'));
     this.panel.querySelector('#sketch-tool-center-rect')!.addEventListener('click', () => this.setTool('centerRect'));
     this.panel.querySelector('#sketch-tool-slot')!.addEventListener('click', () => this.setTool('slot'));
     this.panel.querySelector('#sketch-tool-circle')!.addEventListener('click', () => this.setTool('circle'));
@@ -3942,6 +4291,7 @@ export class SketchController {
     this.panel.querySelector('#sketch-tool-arc3pt')!.addEventListener('click', () => this.setTool('arc3pt'));
     this.panel.querySelector('#sketch-tool-polygon')!.addEventListener('click', () => this.setTool('polygon'));
     this.panel.querySelector('#sketch-tool-fillet')!.addEventListener('click', () => this.setTool('fillet'));
+    this.panel.querySelector('#sketch-tool-chamfer')!.addEventListener('click', () => this.setTool('chamfer'));
     this.panel.querySelector('#sketch-tool-trim')!.addEventListener('click', () => this.setTool('trim'));
     this.panel.querySelector('#sketch-tool-mirror')!.addEventListener('click', () => this.setTool('mirror'));
     this.panel.querySelector('#sketch-tool-point')!.addEventListener('click', () => this.setTool('point'));
@@ -3954,26 +4304,49 @@ export class SketchController {
       this.render();
     });
 
+    const optionalRadius = (id: string, assign: (value: number | null) => void): void => {
+      this.panel.querySelector<HTMLInputElement>(id)?.addEventListener('change', (event) => {
+        const value = Number((event.target as HTMLInputElement).value);
+        assign(Number.isFinite(value) && value > 0 ? value : null);
+      });
+    };
+    optionalRadius('#sketch-fillet-radius', (value) => { this.filletRadiusMm = value; });
+    optionalRadius('#sketch-rounded-radius', (value) => { this.roundedRectRadiusMm = value; });
+    this.panel.querySelector<HTMLInputElement>('#sketch-chamfer-d1')?.addEventListener('change', (event) => {
+      const value = Number((event.target as HTMLInputElement).value);
+      if (Number.isFinite(value) && value > 0) this.chamferFirstMm = value;
+    });
+    this.panel.querySelector<HTMLInputElement>('#sketch-chamfer-d2')?.addEventListener('change', (event) => {
+      const value = Number((event.target as HTMLInputElement).value);
+      if (Number.isFinite(value) && value > 0) this.chamferSecondMm = value;
+    });
+
     this.panel.querySelector('#sketch-finish-chain')?.addEventListener('click', () => {
       this.finishChain();
     });
     this.panel.querySelector('#sketch-remove-conflict')?.addEventListener('click', () => {
       if (conflicting.length > 0) {
         this.pushUndo();
-        this.constraints.splice(conflicting[conflicting.length - 1], 1);
+        this.removeConstraintAt(conflicting[conflicting.length - 1]);
         void this.solve();
       }
     });
     this.panel.querySelector('#sketch-remove-redundant')?.addEventListener('click', () => {
       if (redundant.length > 0) {
         this.pushUndo();
-        this.constraints.splice(redundant[redundant.length - 1], 1);
+        this.removeConstraintAt(redundant[redundant.length - 1]);
         void this.solve();
       }
     });
 
     this.panel.querySelector<HTMLInputElement>('#sketch-raster-snap')?.addEventListener('change', (e) => {
       this.rasterSnapEnabled = (e.target as HTMLInputElement).checked;
+      document.documentElement.dataset.rasterSnap = String(this.rasterSnapEnabled);
+      this.viewer.requestRender();
+    });
+    this.panel.querySelector<HTMLInputElement>('#sketch-guide-snap')?.addEventListener('change', (e) => {
+      this.guideSnapEnabled = (e.target as HTMLInputElement).checked;
+      document.documentElement.dataset.guideSnap = String(this.guideSnapEnabled);
       this.viewer.requestRender();
     });
     this.panel.querySelector<HTMLInputElement>('#sketch-pin-raster')?.addEventListener('change', (e) => {
@@ -4052,8 +4425,10 @@ export class SketchController {
           this.referenceConstraints = this.referenceConstraints.filter((i) => i !== idx);
         } else if (!this.referenceConstraints.includes(idx)) {
           this.referenceConstraints.push(idx);
+          if (this.editingConstraintIdx === idx) this.editingConstraintIdx = null;
         }
         void this.solveSilent();
+        this.render();
         this.viewer.requestRender();
         this.onChange?.();
       });
@@ -4063,10 +4438,7 @@ export class SketchController {
       const idx = Number(el.dataset.index);
       el.addEventListener('click', () => {
         this.pushUndo();
-        this.constraints.splice(idx, 1);
-        this.referenceConstraints = this.referenceConstraints
-          .filter((i) => i !== idx)
-          .map((i) => (i > idx ? i - 1 : i));
+        this.removeConstraintAt(idx);
         void this.solveSilent();
         this.render();
         this.viewer.requestRender();

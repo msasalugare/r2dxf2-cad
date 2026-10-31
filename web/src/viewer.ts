@@ -4,8 +4,8 @@
 //
 // Coordinate spaces:
 // - raster `(u, v)`: image pixels (y-down).
-// - world `(x, y)`: millimetres after calibration (y-up); equal to raster until
-//   a calibration transform is applied.
+// - World `(x, y)`: calibrated millimetres around the fixed raster origin (y-up).
+// - Part `(x, y)`: calibrated millimetres after levelling around the Part origin.
 // - screen: CSS pixels on the canvas.
 //
 // The raster is drawn through an affine `rasterTransform` (default identity)
@@ -20,6 +20,12 @@ import {
   type Camera,
 } from './camera';
 import { TILE_SIZE, tileHeight, tileIndex, tileWidth, type RasterPage } from './raster';
+import {
+  partToRasterPoint,
+  rasterToPartPoint,
+  rasterToWorldPoint,
+  worldToRasterPoint,
+} from './coordinate-system';
 
 /** Affine as Canvas 2D coefficients: `[a, b, c, d, e, f]`. */
 export type Affine = [number, number, number, number, number, number];
@@ -146,45 +152,39 @@ export class RasterViewer {
     }
   }
 
-  /**
-   * Origin `(x, y)` in raster/sketch coordinate space.
-   * Defaults to the bottom-left corner of the raster `(0, H)` when a raster is loaded,
-   * or a user-positioned custom origin when moved.
-   */
-  getOrigin(): { x: number; y: number } {
-    if (this.customOrigin) {
-      return { x: this.customOrigin.x, y: this.customOrigin.y };
-    }
-    if (this.page) {
-      return { x: 0, y: this.page.meta.height };
-    }
+  getWorldOrigin(): { x: number; y: number } {
+    if (this.page) return { x: 0, y: this.page.meta.height };
     return { x: 80, y: Math.max(200, (this.viewHeight() || 720) - 80) };
   }
 
-  /** Move the coordinate system `(0, 0)` to raster coordinates `(rx, ry)`. */
+  /** Part origin in raw raster coordinates; World never uses this custom offset. */
+  getOrigin(): { x: number; y: number } {
+    return this.customOrigin ? { ...this.customOrigin } : this.getWorldOrigin();
+  }
+
+  /** Move only the Part coordinate system origin. */
   setOrigin(rx: number, ry: number): void {
     this.customOrigin = { x: rx, y: ry };
     this.scheduleRender();
     this.onCameraChange?.();
   }
 
-  /** Reset the coordinate system `(0, 0)` back to the bottom-left corner of the raster. */
+  /** Reset only the Part coordinate system origin. */
   resetOrigin(): void {
     this.customOrigin = null;
     this.scheduleRender();
     this.onCameraChange?.();
   }
 
-  /** Snap a coordinate `(x, y)` to the CAD grid around the origin if grid snap is active. */
+  /** Snap raw raster coordinates to the calibrated Part grid. */
   snapToGrid(x: number, y: number): { x: number; y: number } {
     if (!this.gridSnapEnabled) return { x, y };
-    const orig = this.getOrigin();
-    const stepX = this.gridStep / (this.worldScale.sx || 1);
-    const stepY = this.gridStep / (this.worldScale.sy || 1);
-    return {
-      x: orig.x + Math.round((x - orig.x) / stepX) * stepX,
-      y: orig.y + Math.round((y - orig.y) / stepY) * stepY,
-    };
+    const part = this.rasterToPart(x, y);
+    const snapped = this.partToRaster(
+      Math.round(part.x / this.gridStep) * this.gridStep,
+      Math.round(part.y / this.gridStep) * this.gridStep,
+    );
+    return snapped ?? { x, y };
   }
 
   /** Rotate and translate the background around the page center by `(dTheta, dx, dy)`. */
@@ -253,40 +253,48 @@ export class RasterViewer {
     this.onCameraChange?.();
   }
 
-  /** World coordinates (relative to `(0,0)` origin, y-up, scaled by `worldScale` mm/px) under a client point. */
   clientToWorld(clientX: number, clientY: number): { x: number; y: number } {
-    const r = this.clientToRaster(clientX, clientY);
-    const orig = this.getOrigin();
-    if (r) {
-      return {
-        x: (r.x - orig.x) * this.worldScale.sx,
-        y: (orig.y - r.y) * this.worldScale.sy,
-      };
-    }
+    const raster = this.clientToRaster(clientX, clientY);
+    if (raster) return this.rasterToWorld(raster.x, raster.y);
     const rect = this.canvas.getBoundingClientRect();
-    const w = screenToWorld(this.camera, clientX - rect.left, clientY - rect.top);
-    return {
-      x: (w.x - orig.x) * this.worldScale.sx,
-      y: (orig.y - w.y) * this.worldScale.sy,
-    };
+    const point = screenToWorld(this.camera, clientX - rect.left, clientY - rect.top);
+    return this.rasterToWorld(point.x, point.y);
   }
 
-  /** Convert raster coordinates `(rx, ry)` to CAD world coordinates `(X, Y)` relative to `(0, 0)`. */
+  clientToPart(clientX: number, clientY: number): { x: number; y: number } {
+    const raster = this.clientToRaster(clientX, clientY);
+    if (raster) return this.rasterToPart(raster.x, raster.y);
+    const rect = this.canvas.getBoundingClientRect();
+    const point = screenToWorld(this.camera, clientX - rect.left, clientY - rect.top);
+    return this.rasterToPart(point.x, point.y);
+  }
+
+  /** Calibrated World millimetres, independent of Part origin and levelling. */
   rasterToWorld(rx: number, ry: number): { x: number; y: number } {
-    const orig = this.getOrigin();
-    return {
-      x: (rx - orig.x) * this.worldScale.sx,
-      y: (orig.y - ry) * this.worldScale.sy,
-    };
+    return rasterToWorldPoint({ x: rx, y: ry }, this.getWorldOrigin(), this.worldScale);
   }
 
-  /** Convert CAD world coordinates `(X, Y)` relative to `(0, 0)` back to raster coordinates `(rx, ry)`. */
   worldToRaster(wx: number, wy: number): { x: number; y: number } {
-    const orig = this.getOrigin();
-    return {
-      x: orig.x + wx / (this.worldScale.sx || 1),
-      y: orig.y - wy / (this.worldScale.sy || 1),
-    };
+    return worldToRasterPoint({ x: wx, y: wy }, this.getWorldOrigin(), this.worldScale);
+  }
+
+  /** Calibrated and levelled Part millimetres around the custom Part origin. */
+  rasterToPart(rx: number, ry: number): { x: number; y: number } {
+    return rasterToPartPoint(
+      { x: rx, y: ry },
+      this.getOrigin(),
+      this.worldScale,
+      this.rasterTransform,
+    );
+  }
+
+  partToRaster(px: number, py: number): { x: number; y: number } | null {
+    return partToRasterPoint(
+      { x: px, y: py },
+      this.getOrigin(),
+      this.worldScale,
+      this.rasterTransform,
+    );
   }
 
   /** Combined raster→screen affine `[a, b, c, d, e, f]`. */
@@ -616,13 +624,7 @@ export class RasterViewer {
 
   private drawOriginAxes(ctx: CanvasRenderingContext2D, w: number, h: number): void {
     const orig = this.getOrigin();
-    // Anchor the axes to the raster origin using the camera-only mapping, so
-    // calibration rotation (levelling) rotates the raster but leaves the axes
-    // in their original screen-aligned position.
-    const origScreen = {
-      x: this.camera.zoom * orig.x + this.camera.x,
-      y: this.camera.zoom * orig.y + this.camera.y,
-    };
+    const origScreen = this.rasterToScreen(orig.x, orig.y);
     const uxX = 1;
     const uxY = 0;
     const lenX = 1;

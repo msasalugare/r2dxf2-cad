@@ -3,6 +3,12 @@
 
 import { strFromU8, strToU8, unzipSync, zipSync } from 'fflate';
 import type { SegmentOrientation } from './calibration';
+import {
+  rasterToPartPoint,
+  type CoordinateAffine,
+  type CoordinatePoint,
+  type CoordinateScale,
+} from './coordinate-system';
 
 export const PROJECT_VERSION = 1 as const;
 
@@ -47,12 +53,22 @@ export interface SavedSketchArc {
   construction?: boolean;
 }
 
+export interface SavedSketchText {
+  id: number;
+  x: number;
+  y: number;
+  text: string;
+  height: number;
+  rotation: number;
+}
+
 export interface SavedSketchData {
   points: SavedSketchPoint[];
   lines: SavedSketchLine[];
   circles: SavedSketchCircle[];
   arcs: SavedSketchArc[];
   constraints: Record<string, unknown>[];
+  texts?: SavedSketchText[];
   reference_constraints?: number[];
   /** Linear part `[a, b, c, d]` of the raster→screen affine; H/V constraints are
    *  measured in this frame (coordinate-system axes) when present. */
@@ -94,6 +110,43 @@ export function sketchToWorld(
   return { ...sketch, points, circles, arcs };
 }
 
+export function sketchToPart(
+  sketch: SavedSketchData,
+  scale: CoordinateScale,
+  origin: CoordinatePoint,
+  transform: CoordinateAffine,
+): SavedSketchData {
+  const safeScale = { sx: scale.sx > 0 ? scale.sx : 1, sy: scale.sy > 0 ? scale.sy : 1 };
+  const tau = Math.PI * 2;
+  const norm = (angle: number): number => ((angle % tau) + tau) % tau;
+  const toPart = (point: CoordinatePoint): CoordinatePoint =>
+    rasterToPartPoint(point, origin, safeScale, transform);
+  const toPartVector = (center: CoordinatePoint, vector: CoordinatePoint): CoordinatePoint => {
+    const a = toPart(center);
+    const b = toPart({ x: center.x + vector.x, y: center.y + vector.y });
+    return { x: b.x - a.x, y: b.y - a.y };
+  };
+  const determinant = (transform[0] * transform[3] - transform[2] * transform[1]) * -safeScale.sx * safeScale.sy;
+
+  const points = sketch.points.map((point) => ({ ...point, ...toPart(point) }));
+  const circles = sketch.circles.map((circle) => ({ ...circle, radius: circle.radius * safeScale.sx }));
+  const arcs = sketch.arcs.map((arc) => {
+    const center = sketch.points.find((point) => point.id === arc.center) ?? { x: 0, y: 0 };
+    const startVector = toPartVector(center, { x: Math.cos(arc.start), y: Math.sin(arc.start) });
+    const endVector = toPartVector(center, { x: Math.cos(arc.end), y: Math.sin(arc.end) });
+    const transformedStart = Math.atan2(startVector.y, startVector.x);
+    const transformedEnd = Math.atan2(endVector.y, endVector.x);
+    const start = norm(determinant < 0 ? transformedEnd : transformedStart);
+    const sweep = norm(arc.end - arc.start);
+    return { ...arc, radius: arc.radius * safeScale.sx, start, end: start + sweep };
+  });
+  const texts = sketch.texts?.map((text) => {
+    const direction = toPartVector(text, { x: Math.cos(text.rotation), y: Math.sin(text.rotation) });
+    return { ...text, ...toPart(text), rotation: Math.atan2(direction.y, direction.x) };
+  });
+  return { ...sketch, points, circles, arcs, texts };
+}
+
 export interface SavedMaskStroke {
   mode: 'include' | 'exclude';
   kind?: 'brush' | 'polygon' | 'rect';
@@ -101,13 +154,37 @@ export interface SavedMaskStroke {
   points: { x: number; y: number }[];
 }
 
+export interface SavedMeasurement {
+  id: number;
+  kind: 'distance' | 'angle';
+  points: { x: number; y: number }[];
+}
+
+export interface SavedHatch {
+  id: number;
+  points: { x: number; y: number }[];
+  spacing: number;
+  angle: number;
+}
+
+export interface SavedGuide {
+  id: number;
+  kind: 'horizontal' | 'vertical';
+  value: number;
+}
+
 export interface PageWorkspaceState {
   rasterTransform: [number, number, number, number, number, number];
+  partOrigin?: { x: number; y: number };
   calibrationSegments: SavedCalibrationSegment[];
   calibrationScale?: { sx: number; sy: number; theta: number };
   sketch: SavedSketchData;
   maskStrokes: SavedMaskStroke[];
   maskEnabled?: boolean;
+  measurements?: SavedMeasurement[];
+  hatches?: SavedHatch[];
+  guides?: SavedGuide[];
+  texts?: SavedSketchText[];
   lastFitReportJson?: string;
 }
 

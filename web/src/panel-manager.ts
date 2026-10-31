@@ -2,7 +2,7 @@
 // guarantees at most one panel is open at a time.
 //
 // The app has two kinds of panels:
-//   - tool panels (calibration / sketch / mask), whose open state is the
+//   - tool panels (calibration / sketch / mask / measure / text), whose open state is the
 //     controller's `active` flag (they also change the canvas cursor and input
 //     routing), and
 //   - utility panels (pages / account), whose open state is the element's
@@ -12,7 +12,7 @@
 // twice), so a controller that deactivates itself (e.g. the sketch panel's
 // close button) stays consistent without the manager being notified.
 
-export type PanelId = 'calibration' | 'sketch' | 'mask' | 'adjust' | 'pages' | 'account';
+export type PanelId = 'calibration' | 'sketch' | 'mask' | 'measure' | 'text' | 'adjust' | 'pages' | 'account';
 
 export interface PanelHandle {
   isOpen(): boolean;

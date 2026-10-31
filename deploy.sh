@@ -17,8 +17,8 @@ cd "$ROOT"
 SSH_KEY="${SSH_KEY:-$HOME/.ssh/rasterfit_deploy}"
 SERVER="${SERVER:-root@187.124.20.168}"
 PORT="${PORT:-8080}"
-IMAGE="rasterfit:final"
-CONTAINER="rasterfit"
+IMAGE="${IMAGE:-rasterfit:final}"
+CONTAINER="${CONTAINER:-rasterfit}"
 
 echo "==> Building ${IMAGE} (local)"
 if [ "${FULL_DOCKER_BUILD:-0}" = "1" ]; then

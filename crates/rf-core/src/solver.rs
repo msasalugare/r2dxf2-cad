@@ -442,6 +442,11 @@ pub(crate) fn residual_vec(sketch: &Sketch, p: &[Dual], c: &Constraint) -> Vec<D
         |dx: Dual, dy: Dual| Dual::constant(fa, grad_n) * dx + Dual::constant(fc, grad_n) * dy;
     let frame_y =
         |dx: Dual, dy: Dual| Dual::constant(fb, grad_n) * dx + Dual::constant(fd, grad_n) * dy;
+    let angle_residual = |angle: Dual, target: f64| {
+        let tau = std::f64::consts::TAU;
+        let turns = ((angle.v - target) / tau).round();
+        angle - Dual::constant(target + turns * tau, grad_n)
+    };
     let radius = |id| {
         let j = sketch.circle_index(id).expect("circle exists");
         p[2 * n_points + j].clone()
@@ -588,7 +593,7 @@ pub(crate) fn residual_vec(sketch: &Sketch, p: &[Dual], c: &Constraint) -> Vec<D
             let (bx, by) = line_dir(b);
             let cross = ax.clone() * by.clone() - ay.clone() * bx.clone();
             let dot = ax * bx + ay * by;
-            vec![atan2(cross, dot) - Dual::constant(target, grad_n)]
+            vec![angle_residual(atan2(cross, dot), target)]
         }
         Constraint::Radius(circle, r) => vec![radius(circle) - Dual::constant(r, grad_n)],
         Constraint::Diameter(circle, d) => {
@@ -645,7 +650,9 @@ pub(crate) fn residual_vec(sketch: &Sketch, p: &[Dual], c: &Constraint) -> Vec<D
         }
         Constraint::AngleLine(l, target) => {
             let (dx, dy) = line_dir(l);
-            vec![atan2(dy, dx) - Dual::constant(target, grad_n)]
+            let fx = frame_x(dx.clone(), dy.clone());
+            let fy = frame_y(dx, dy);
+            vec![angle_residual(atan2(fy, fx), target)]
         }
         Constraint::SymmetricPoints(p1, p2, mid) => {
             let (x1, y1) = point(p1);
@@ -1185,5 +1192,72 @@ mod tests {
             (res.params[2] - res.params[0]).abs() > 0.1,
             "expected a non-raster-vertical result"
         );
+    }
+
+    #[test]
+    fn angle_line_references_coordinate_frame() {
+        let theta = 30f64.to_radians();
+        let (s, c) = (theta.sin(), theta.cos());
+        let mut sketch = Sketch {
+            points: vec![p(1, 0.0, 0.0), p(2, c, -s + 0.2)],
+            lines: vec![line(1, 1, 2)],
+            constraints: vec![Constraint::AngleLine(LineId::new(1), 0.0)],
+            ..Default::default()
+        };
+        sketch.frame = Some([c, s, -s, c]);
+
+        let result = solve(&sketch);
+        assert!(result.converged, "max residual {}", result.max_residual);
+        let dx = result.params[2] - result.params[0];
+        let dy = result.params[3] - result.params[1];
+        let frame_angle = (s * dx + c * dy).atan2(c * dx - s * dy);
+        assert!(frame_angle.abs() < 1e-9, "frame angle {frame_angle}");
+        assert!(
+            dy.atan2(dx).abs() > 0.1,
+            "angle incorrectly used raster axes"
+        );
+    }
+
+    #[test]
+    fn angle_line_accepts_equivalent_full_turn_target() {
+        let sketch = Sketch {
+            points: vec![p(1, 0.0, 0.0), p(2, 10.0, 0.0)],
+            lines: vec![line(1, 1, 2)],
+            constraints: vec![Constraint::AngleLine(
+                LineId::new(1),
+                3.0 * std::f64::consts::FRAC_PI_2,
+            )],
+            ..Default::default()
+        };
+
+        let result = solve(&sketch);
+        assert!(result.converged, "max residual {}", result.max_residual);
+        let angle =
+            (result.params[3] - result.params[1]).atan2(result.params[2] - result.params[0]);
+        assert!((angle + std::f64::consts::FRAC_PI_2).abs() < 1e-9);
+    }
+
+    #[test]
+    fn angle_between_lines_accepts_equivalent_full_turn_target() {
+        let sketch = Sketch {
+            points: vec![p(1, 0.0, 0.0), p(2, 10.0, 0.0), p(3, 10.0, 2.0)],
+            lines: vec![line(1, 1, 2), line(2, 1, 3)],
+            constraints: vec![
+                Constraint::FixedPoint(PointId::new(1), 0.0, 0.0),
+                Constraint::FixedPoint(PointId::new(2), 10.0, 0.0),
+                Constraint::Angle(
+                    LineId::new(1),
+                    LineId::new(2),
+                    3.0 * std::f64::consts::FRAC_PI_2,
+                ),
+            ],
+            ..Default::default()
+        };
+
+        let result = solve(&sketch);
+        assert!(result.converged, "max residual {}", result.max_residual);
+        let angle =
+            (result.params[5] - result.params[1]).atan2(result.params[4] - result.params[0]);
+        assert!((angle + std::f64::consts::FRAC_PI_2).abs() < 1e-9);
     }
 }

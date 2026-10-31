@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { strToU8, zipSync } from 'fflate';
 import {
   hashBytes,
+  sketchToPart,
   sketchToWorld,
   unzipProject,
   zipProject,
@@ -46,6 +47,37 @@ describe('sketchToWorld', () => {
     expect(world.arcs[0].start).toBeCloseTo((3 * Math.PI) / 2);
     expect(world.arcs[0].end).toBeCloseTo(Math.PI * 2);
     expect(world.arcs[0].end - world.arcs[0].start).toBeCloseTo(Math.PI / 2);
+  });
+});
+
+describe('sketchToPart', () => {
+  it('applies levelling, Part origin and calibration to geometry and text', () => {
+    const sketch: SavedSketchData = {
+      points: [
+        { id: 1, x: 0, y: 100 },
+        { id: 2, x: 20, y: 80 },
+      ],
+      lines: [{ id: 1, a: 1, b: 2 }],
+      circles: [],
+      arcs: [{ id: 2, center: 1, radius: 10, start: 0, end: Math.PI / 2 }],
+      constraints: [],
+      texts: [{ id: 1, x: 20, y: 80, text: 'Oznaka', height: 3, rotation: 0 }],
+    };
+    const part = sketchToPart(
+      sketch,
+      { sx: 1, sy: 1 },
+      { x: 0, y: 100 },
+      [0, 1, -1, 0, 0, 0],
+    );
+    expect(part.points[0].x).toBeCloseTo(0);
+    expect(part.points[0].y).toBeCloseTo(0);
+    expect(part.points[1].x).toBeCloseTo(20);
+    expect(part.points[1].y).toBeCloseTo(-20);
+    expect(part.arcs[0].start).toBeCloseTo(Math.PI);
+    expect(part.arcs[0].end).toBeCloseTo((3 * Math.PI) / 2);
+    expect(part.texts?.[0].x).toBeCloseTo(20);
+    expect(part.texts?.[0].y).toBeCloseTo(-20);
+    expect(part.texts?.[0].rotation).toBeCloseTo(-Math.PI / 2);
   });
 });
 
@@ -112,6 +144,22 @@ describe('project zip', () => {
             },
           ],
           maskEnabled: true,
+          measurements: [
+            { id: 1, kind: 'distance', points: [{ x: 100, y: 200 }, { x: 300, y: 200 }] },
+            { id: 2, kind: 'angle', points: [{ x: 100, y: 200 }, { x: 200, y: 200 }, { x: 200, y: 300 }] },
+          ],
+          hatches: [
+            {
+              id: 1,
+              points: [{ x: 100, y: 100 }, { x: 300, y: 100 }, { x: 300, y: 300 }, { x: 100, y: 300 }],
+              spacing: 4.5,
+              angle: 45,
+            },
+          ],
+          guides: [
+            { id: 1, kind: 'horizontal', value: 125.5 },
+            { id: 2, kind: 'vertical', value: -40 },
+          ],
         },
       },
     };

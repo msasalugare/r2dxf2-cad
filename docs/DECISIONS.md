@@ -162,8 +162,9 @@ resolved from the live registries on 2026-10-24.
 
 ## M7 export decisions
 
-- **DXF** is emitted as ASCII R12 with an `ENTITIES` section of `LINE`/`CIRCLE`
-  on `geometry`/`construction` layers (mm, y-up). Coordinates are formatted with
+- **DXF** is emitted as ASCII R12 in Part coordinates with an `ENTITIES` section
+  of `LINE`/`CIRCLE`/`ARC` on `geometry`/`construction` layers and `TEXT` on
+  `annotations` (mm, y-up). Coordinates are formatted with
   9 decimals (trimmed) so a round-trip parse agrees to < 1e-6 mm (T14); the
   round-trip parser is a small in-test reader, so no third-party DXF crate.
 - **SVG** flips y (world y-up → SVG y-down) via `viewBox` bounds and mirrors the

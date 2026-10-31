@@ -70,7 +70,7 @@ export class AccountController {
     return `
       <div class="auth-brand">
         <span class="auth-logo">RasterFit</span>
-        <span class="auth-byline">by Saša Mladenović &amp; DeepSeek</span>
+        <span class="auth-byline">autor: Saša Mladenović &amp; DeepSeek</span>
       </div>
       <form data-action="login" class="account-form auth-login-form">
         <label>${t(this.locale, 'account.username')}

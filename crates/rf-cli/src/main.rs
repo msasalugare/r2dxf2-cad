@@ -6,7 +6,7 @@
 //! - `fit`: `FitRequest` -> `FitterResult` JSON
 //! - `detect-ridges`: `DetectRidgesRequest` -> `Vec<RidgePoint>` JSON
 //! - `snap-ridge`: `SnapRidgeRequest` -> `Option<Point>` JSON
-//! - `export-dxf`: `Sketch` -> ASCII DXF
+//! - `export-dxf`: `ExportDxfRequest` -> ASCII DXF
 //! - `export-svg`: `Sketch` -> SVG
 //! - `report-json`: `FitterResult` -> `FitSummary` JSON
 //! - `report-csv`: `FitterResult` -> CSV
@@ -19,12 +19,21 @@ use std::process;
 
 use serde::Deserialize;
 
+use rf_core::dxf::{export_dxf_with_texts, TextAnnotation};
 use rf_core::fitter::{fit, fit_masked, FitterParams, FitterResult};
 use rf_core::mask::{MaskParams, MaskStroke};
 use rf_core::report::{summary_csv, summary_json};
 use rf_core::ridge::{detect_ridges, snap_to_ridge, RidgeParams, RidgePoint};
 use rf_core::sketch::Sketch;
 use rf_core::solver::solve;
+
+#[derive(Deserialize)]
+struct ExportDxfRequest {
+    #[serde(flatten)]
+    sketch: Sketch,
+    #[serde(default)]
+    texts: Vec<TextAnnotation>,
+}
 
 #[derive(Deserialize)]
 struct FitRequest {
@@ -144,9 +153,9 @@ fn run() -> Result<String, String> {
         }
         "export-dxf" => {
             let input = read_stdin()?;
-            let sketch: Sketch =
-                serde_json::from_str(&input).map_err(|e| format!("invalid Sketch JSON: {e}"))?;
-            Ok(rf_core::dxf::export_dxf(&sketch))
+            let req: ExportDxfRequest = serde_json::from_str(&input)
+                .map_err(|e| format!("invalid ExportDxfRequest JSON: {e}"))?;
+            Ok(export_dxf_with_texts(&req.sketch, &req.texts))
         }
         "export-svg" => {
             let input = read_stdin()?;
@@ -179,5 +188,36 @@ fn main() {
             eprintln!("{e}");
             process::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn export_dxf_request_accepts_sketch_without_texts() {
+        let req: ExportDxfRequest =
+            serde_json::from_str(r#"{"points":[],"lines":[],"constraints":[]}"#).unwrap();
+
+        assert_eq!(req.sketch, Sketch::default());
+        assert!(req.texts.is_empty());
+    }
+
+    #[test]
+    fn export_dxf_request_parses_flat_sketch_and_texts() {
+        let req: ExportDxfRequest = serde_json::from_str(
+            r#"{
+                "points":[],"lines":[],"constraints":[],
+                "texts":[{"id":4,"x":1.5,"y":2.5,"text":"hello","height":3.5,"rotation":0.5}]
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(req.sketch, Sketch::default());
+        assert_eq!(req.texts.len(), 1);
+        assert_eq!(req.texts[0].id, 4);
+        assert_eq!(req.texts[0].text, "hello");
+        assert_eq!(req.texts[0].rotation, 0.5);
     }
 }
