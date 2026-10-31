@@ -180,7 +180,7 @@ export function renderSketchPanel(sk: SketchController): void {
           <button class="btn sketch-fc-c" data-action="Perpendicular" type="button" title="Normalno (N)">⊥ Norm</button>
           <button class="btn sketch-fc-c" data-action="Tangent" type="button" title="Tangenta">⌓ Tan</button>
           <button class="btn sketch-fc-c" data-action="Equal" type="button" title="Jednako (E)">= Jedn</button>
-          <button class="btn sketch-fc-c" data-action="Symmetric" type="button" title="Simetrija">> <Sim</button>
+          <button class="btn sketch-fc-c" data-action="Symmetric" type="button" title="Simetrija">>< Sim</button>
           <button class="btn sketch-fc-c" data-action="Midpoint" type="button" title="Središte">M Sred</button>
           <button class="btn sketch-fc-c" data-action="Collinear" type="button" title="Kolinearno">∥ Kol</button>
           <button class="btn sketch-fc-c" data-action="Block" type="button" title="Fiksiraj na raster (B)">🔒 Fiks</button>
@@ -454,4 +454,3 @@ export function renderSketchPanel(sk: SketchController): void {
     sk.panel.querySelector('#export-json')!.addEventListener('click', () => void sk.exportReportJson());
     sk.panel.querySelector('#export-csv')!.addEventListener('click', () => void sk.exportReportCsv());
   }
-
