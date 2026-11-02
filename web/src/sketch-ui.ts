@@ -36,6 +36,29 @@ import {
   measureDimension,
 } from './sketch-dimensions';
 import { cornerChamferGeometry, cornerFilletGeometry } from './sketch-fillet';
+import {
+  circumcircleArc,
+  projectPointToSegment,
+  reflectPoint,
+  segmentIntersectsRect,
+  segmentIntersectionT,
+  toggleInArray,
+} from './sketch-geometry';
+import { HistoryStack } from './sketch-history';
+import {
+  getCoincidentCluster as coincidentCluster,
+  pruneOrphanConstraints as pruneConstraints,
+} from './sketch-constraints';
+import {
+  findNearArc as hitTestNearArc,
+  findNearCircle as hitTestNearCircle,
+  findNearLine as hitTestNearLine,
+  findNearPoint as hitTestNearPoint,
+  type HitTestEnv,
+} from './sketch-hit-test';
+import { snapToDarkRidge } from './sketch-snap';
+import { drawSketchOverlay } from './sketch-render';
+import { renderSketchPanel } from './sketch-panel';
 import type {
   SavedSketchArc,
   SavedSketchCircle,
@@ -77,42 +100,44 @@ interface SketchSnapshot {
   reference_constraints: number[];
 }
 
+// NOTE: state fields and helper methods are public so the render and panel
+// modules (sketch-render.ts / sketch-panel.ts) can consume them; they are
+// internal API — do not use outside the sketch editor.
 export class SketchController {
-  private points: SavedSketchPoint[] = [];
-  private lines: SavedSketchLine[] = [];
-  private circles: SavedSketchCircle[] = [];
-  private arcs: SavedSketchArc[] = [];
-  private constraints: Record<string, unknown>[] = [];
-  private referenceConstraints: number[] = [];
+  points: SavedSketchPoint[] = [];
+  lines: SavedSketchLine[] = [];
+  circles: SavedSketchCircle[] = [];
+  arcs: SavedSketchArc[] = [];
+  constraints: Record<string, unknown>[] = [];
+  referenceConstraints: number[] = [];
 
-  private undoStack: SketchSnapshot[] = [];
-  private redoStack: SketchSnapshot[] = [];
+  private history = new HistoryStack<SketchSnapshot>(50);
 
   // Selection state for FreeCAD selection-driven constraints
-  private selectedPoints: number[] = [];
-  private selectedLines: number[] = [];
-  private selectedCircles: number[] = [];
-  private selectedArcs: number[] = [];
+  selectedPoints: number[] = [];
+  selectedLines: number[] = [];
+  selectedCircles: number[] = [];
+  selectedArcs: number[] = [];
 
-  private tool: SketchTool = 'polyline';
-  private activeConstraintTool: string | null = null;
-  private editingConstraintIdx: number | null = null;
-  private dimBadgeRects: { cIdx: number; x: number; y: number; w: number; h: number }[] = [];
-  private polyMode: PolylineSubMode = 'line';
+  tool: SketchTool = 'polyline';
+  activeConstraintTool: string | null = null;
+  editingConstraintIdx: number | null = null;
+  dimBadgeRects: { cIdx: number; x: number; y: number; w: number; h: number }[] = [];
+  polyMode: PolylineSubMode = 'line';
   private polygonSides = 6;
-  private filletRadiusMm: number | null = null;
-  private chamferFirstMm = 10;
-  private chamferSecondMm = 10;
-  private roundedRectRadiusMm: number | null = null;
-  private constructionMode = false;
-  private autoConstraints = true;
-  private rasterSnapEnabled = true;
-  private guideSnapEnabled = true;
-  private autoPinRaster = false;
-  private loupeEnabled = false;
-  private grayCache: { data: Uint8Array; width: number; height: number } | null = null;
+  filletRadiusMm: number | null = null;
+  chamferFirstMm = 10;
+  chamferSecondMm = 10;
+  roundedRectRadiusMm: number | null = null;
+  constructionMode = false;
+  autoConstraints = true;
+  rasterSnapEnabled = true;
+  guideSnapEnabled = true;
+  autoPinRaster = false;
+  loupeEnabled = false;
+  grayCache: { data: Uint8Array; width: number; height: number } | null = null;
 
-  private pending: {
+  pending: {
     x: number;
     y: number;
     pointId?: number;
@@ -120,13 +145,13 @@ export class SketchController {
     lastLineId?: number;
     lastArcId?: number;
   } | null = null;
-  private arcStartPending: {
+  arcStartPending: {
     centerId: number;
     startPtId?: number;
     radius: number;
     startAngle: number;
   } | null = null;
-  private arc3PtPending: {
+  arc3PtPending: {
     p1Id: number;
     x1: number;
     y1: number;
@@ -135,7 +160,7 @@ export class SketchController {
     y2?: number;
   } | null = null;
   /** 3-point arc pending within a polyline: joint (a) + end (b) set, waiting for the rim point. */
-  private polyArcPending: {
+  polyArcPending: {
     aId: number;
     ax: number;
     ay: number;
@@ -147,7 +172,7 @@ export class SketchController {
     prevArcId?: number;
     tangent: boolean;
   } | null = null;
-  private dragState:
+  dragState:
     | { kind: 'origin' }
     | { kind: 'point'; id: number; lastX: number; lastY: number }
     | { kind: 'line'; id: number; lastX: number; lastY: number }
@@ -156,14 +181,14 @@ export class SketchController {
     | { kind: 'box'; x0: number; y0: number; x1: number; y1: number }
     | null = null;
   private dragMoved = false;
-  private hoverEntity: {
+  hoverEntity: {
     kind: 'point' | 'line' | 'circle' | 'arc' | 'origin';
     id: number;
   } | null = null;
-  private lastMouse: { x: number; y: number; altKey: boolean } | null = null;
+  lastMouse: { x: number; y: number; altKey: boolean } | null = null;
 
   // RasterFit options (matching raster2sketcher.txt)
-  private fitOpts = {
+  fitOpts = {
     fitGeometry: true,
     fitRotation: true,
     fitTranslation: true,
@@ -172,21 +197,21 @@ export class SketchController {
     captureRadius: 12.0,
     robustScale: 1.5,
   };
-  private preFitSnapshot: { sketch: SketchSnapshot; rasterTransform: Affine } | null = null;
+  preFitSnapshot: { sketch: SketchSnapshot; rasterTransform: Affine } | null = null;
 
-  private active = false;
-  private resultText = '';
-  private lastSolve: SolveResponse | null = null;
+  active = false;
+  resultText = '';
+  lastSolve: SolveResponse | null = null;
   private lastFitJson: string | null = null;
-  private lastFit: FitResponse | null = null;
+  lastFit: FitResponse | null = null;
 
   textProvider: () => SavedSketchText[] = () => [];
 
   constructor(
-    private viewer: RasterViewer,
-    private panel: HTMLElement,
-    private locale: Locale,
-    private onStatus: (msg: string, isError?: boolean) => void,
+    readonly viewer: RasterViewer,
+    readonly panel: HTMLElement,
+    readonly locale: Locale,
+    readonly onStatus: (msg: string, isError?: boolean) => void,
     private getMaskStrokes: () => {
       mode: 'include' | 'exclude';
       kind?: 'brush' | 'polygon' | 'rect';
@@ -194,7 +219,7 @@ export class SketchController {
       points: { x: number; y: number }[];
     }[],
     private onDofChange?: (dof: number, status: 'ok' | 'under' | 'conflict') => void,
-    private onChange?: () => void,
+    readonly onChange?: () => void,
     private snapToGuide?: (
       point: { x: number; y: number },
       tolerancePx: number,
@@ -257,25 +282,6 @@ export class SketchController {
     return this.tool === 'arc3pt' ? 'Luk 3 tačke' : 'Postavi (0,0)';
   }
 
-  /** Reflect a point across the line through `(ax, ay)` and `(bx, by)`. */
-  private reflectPoint(
-    px: number,
-    py: number,
-    ax: number,
-    ay: number,
-    bx: number,
-    by: number,
-  ): { x: number; y: number } {
-    const dx = bx - ax;
-    const dy = by - ay;
-    const len2 = dx * dx + dy * dy;
-    if (len2 < 1e-9) return { x: px, y: py };
-    const t = ((px - ax) * dx + (py - ay) * dy) / len2;
-    const cx = ax + t * dx;
-    const cy = ay + t * dy;
-    return { x: 2 * cx - px, y: 2 * cy - py };
-  }
-
   /**
    * Create an axisymmetric (mirrored) copy of the selected geometry across the
    * given axis line. The original geometry is preserved; new reflected entities
@@ -322,7 +328,7 @@ export class SketchController {
     for (const id of pointIds) {
       const p = this.points.find((x) => x.id === id);
       if (!p) continue;
-      const r = this.reflectPoint(p.x, p.y, pa.x, pa.y, pb.x, pb.y);
+      const r = reflectPoint(p.x, p.y, pa.x, pa.y, pb.x, pb.y);
       const np = this.getOrCreatePoint(r.x, r.y, true, true);
       map.set(id, np.id);
     }
@@ -367,8 +373,8 @@ export class SketchController {
         x: center.x + a.radius * Math.cos(a.end),
         y: center.y + a.radius * Math.sin(a.end),
       };
-      const sRefl = this.reflectPoint(sOrig.x, sOrig.y, pa.x, pa.y, pb.x, pb.y);
-      const eRefl = this.reflectPoint(eOrig.x, eOrig.y, pa.x, pa.y, pb.x, pb.y);
+      const sRefl = reflectPoint(sOrig.x, sOrig.y, pa.x, pa.y, pb.x, pb.y);
+      const eRefl = reflectPoint(eOrig.x, eOrig.y, pa.x, pa.y, pb.x, pb.y);
       this.arcs.push({
         id: this.nextArcId(),
         center: c2!,
@@ -395,7 +401,7 @@ export class SketchController {
       : 2 * this.points.length + this.circles.length + 3 * this.arcs.length;
   }
 
-  private getScaleMm(axis: 'x' | 'y' = 'x'): number {
+  getScaleMm(axis: 'x' | 'y' = 'x'): number {
     const ws = this.viewer.getWorldScale();
     const scale = axis === 'y' ? ws.sy : ws.sx;
     return scale > 0 ? scale : 1;
@@ -530,8 +536,7 @@ export class SketchController {
     this.referenceConstraints = [...(state.reference_constraints ?? [])];
     this.lastFitJson = lastFitReportJson ?? null;
     this.lastFit = null;
-    this.undoStack = [];
-    this.redoStack = [];
+    this.history.clear();
     this.pending = null;
     this.arcStartPending = null;
     this.arc3PtPending = null;
@@ -575,23 +580,19 @@ export class SketchController {
     };
   }
 
-  private pushUndo(): void {
-    this.undoStack.push(this.captureSnapshot());
-    if (this.undoStack.length > 50) this.undoStack.shift();
-    this.redoStack = [];
+  pushUndo(): void {
+    this.history.push(this.captureSnapshot());
   }
 
   undo(): void {
-    const snap = this.undoStack.pop();
+    const snap = this.history.undo(this.captureSnapshot());
     if (!snap) return;
-    this.redoStack.push(this.captureSnapshot());
     this.restoreSnapshot(snap);
   }
 
   redo(): void {
-    const snap = this.redoStack.pop();
+    const snap = this.history.redo(this.captureSnapshot());
     if (!snap) return;
-    this.undoStack.push(this.captureSnapshot());
     this.restoreSnapshot(snap);
   }
 
@@ -809,159 +810,40 @@ export class SketchController {
   }
 
   private pruneOrphanConstraints(): void {
-    const ptIds = new Set(this.points.map((p) => p.id));
-    const lnIds = new Set(this.lines.map((l) => l.id));
-    const ciIds = new Set(this.circles.map((c) => c.id));
-    const arIds = new Set(this.arcs.map((a) => a.id));
+    this.constraints = pruneConstraints(
+      this.constraints,
+      new Set(this.points.map((p) => p.id)),
+      new Set(this.lines.map((l) => l.id)),
+      new Set(this.circles.map((c) => c.id)),
+      new Set(this.arcs.map((a) => a.id)),
+    );
+  }
 
-    this.constraints = this.constraints.filter((c) => {
-      const k = Object.keys(c)[0];
-      const v = (c as Record<string, unknown>)[k];
-      switch (k) {
-        case 'Horizontal':
-        case 'Vertical':
-          return lnIds.has(v as number);
-        case 'LineLength':
-        case 'AngleLine':
-          return Array.isArray(v) && lnIds.has(v[0] as number);
-        case 'Parallel':
-        case 'Perpendicular':
-        case 'EqualLength':
-        case 'Collinear':
-        case 'Angle':
-          return Array.isArray(v) && lnIds.has(v[0] as number) && lnIds.has(v[1] as number);
-        case 'Coincident':
-        case 'HorizontalPoints':
-        case 'VerticalPoints':
-        case 'Distance':
-        case 'HorizontalDistance':
-        case 'VerticalDistance':
-          return Array.isArray(v) && ptIds.has(v[0] as number) && ptIds.has(v[1] as number);
-        case 'FixedPoint':
-          return Array.isArray(v) && ptIds.has(v[0] as number);
-        case 'PointOnLine':
-        case 'Midpoint':
-        case 'DistancePointLine':
-          return Array.isArray(v) && ptIds.has(v[0] as number) && lnIds.has(v[1] as number);
-        case 'PointOnCircle':
-          return Array.isArray(v) && ptIds.has(v[0] as number) && ciIds.has(v[1] as number);
-        case 'PointOnArc':
-          return Array.isArray(v) && ptIds.has(v[0] as number) && arIds.has(v[1] as number);
-        case 'Symmetric':
-          return (
-            Array.isArray(v) &&
-            ptIds.has(v[0] as number) &&
-            ptIds.has(v[1] as number) &&
-            lnIds.has(v[2] as number)
-          );
-        case 'SymmetricPoints':
-          return (
-            Array.isArray(v) &&
-            ptIds.has(v[0] as number) &&
-            ptIds.has(v[1] as number) &&
-            ptIds.has(v[2] as number)
-          );
-        case 'Radius':
-        case 'Diameter':
-          return Array.isArray(v) && ciIds.has(v[0] as number);
-        case 'ArcRadius':
-          return Array.isArray(v) && arIds.has(v[0] as number);
-        case 'EqualRadius':
-        case 'TangentCircleCircle':
-          return Array.isArray(v) && ciIds.has(v[0] as number) && ciIds.has(v[1] as number);
-        case 'EqualRadiusArc':
-        case 'TangentArcArc':
-          return Array.isArray(v) && arIds.has(v[0] as number) && arIds.has(v[1] as number);
-        case 'EqualRadiusCircleArc':
-          return Array.isArray(v) && ciIds.has(v[0] as number) && arIds.has(v[1] as number);
-        case 'TangentLineCircle':
-        case 'PerpendicularLineCircle':
-          return Array.isArray(v) && lnIds.has(v[0] as number) && ciIds.has(v[1] as number);
-        case 'TangentLineArc':
-        case 'PerpendicularLineArc':
-          return Array.isArray(v) && lnIds.has(v[0] as number) && arIds.has(v[1] as number);
-        default:
-          return true;
-      }
-    });
+  private hitTestEnv(): HitTestEnv {
+    return {
+      rasterToScreen: this.viewer.rasterToScreen.bind(this.viewer),
+      getEffectiveZoom: () => this.viewer.getEffectiveZoom(),
+    };
   }
 
   /** Find an existing sketch point within `tolScreenPx` CSS pixels on screen. */
-  private findNearPoint(rx: number, ry: number, tolScreenPx = 10): SavedSketchPoint | null {
-    const to = this.viewer.rasterToScreen.bind(this.viewer);
-    const targetScreen = to(rx, ry);
-    let best: SavedSketchPoint | null = null;
-    let bestDist = tolScreenPx;
-    for (const p of this.points) {
-      const s = to(p.x, p.y);
-      const d = Math.hypot(s.x - targetScreen.x, s.y - targetScreen.y);
-      if (d <= bestDist) {
-        bestDist = d;
-        best = p;
-      }
-    }
-    return best;
+  findNearPoint(rx: number, ry: number, tolScreenPx = 10): SavedSketchPoint | null {
+    return hitTestNearPoint(this.hitTestEnv(), this.points, rx, ry, tolScreenPx);
   }
 
   /** Find a line segment near `(rx, ry)` within `tolScreenPx` CSS pixels. */
   private findNearLine(rx: number, ry: number, tolScreenPx = 8): SavedSketchLine | null {
-    const to = this.viewer.rasterToScreen.bind(this.viewer);
-    const pScreen = to(rx, ry);
-    let best: SavedSketchLine | null = null;
-    let bestDist = tolScreenPx;
-    for (const l of this.lines) {
-      const pa = this.points.find((p) => p.id === l.a);
-      const pb = this.points.find((p) => p.id === l.b);
-      if (!pa || !pb) continue;
-      const a = to(pa.x, pa.y);
-      const b = to(pb.x, pb.y);
-      const d = distToSegment(pScreen.x, pScreen.y, a.x, a.y, b.x, b.y);
-      if (d <= bestDist) {
-        bestDist = d;
-        best = l;
-      }
-    }
-    return best;
+    return hitTestNearLine(this.hitTestEnv(), this.points, this.lines, rx, ry, tolScreenPx);
   }
 
   /** Find a circle rim near `(rx, ry)` within `tolScreenPx` CSS pixels. */
   private findNearCircle(rx: number, ry: number, tolScreenPx = 8): SavedSketchCircle | null {
-    const to = this.viewer.rasterToScreen.bind(this.viewer);
-    const pScreen = to(rx, ry);
-    const zoom = this.viewer.getEffectiveZoom();
-    let best: SavedSketchCircle | null = null;
-    let bestDist = tolScreenPx;
-    for (const c of this.circles) {
-      const center = this.points.find((p) => p.id === c.center);
-      if (!center) continue;
-      const sc = to(center.x, center.y);
-      const d = Math.abs(Math.hypot(pScreen.x - sc.x, pScreen.y - sc.y) - c.radius * zoom);
-      if (d <= bestDist) {
-        bestDist = d;
-        best = c;
-      }
-    }
-    return best;
+    return hitTestNearCircle(this.hitTestEnv(), this.points, this.circles, rx, ry, tolScreenPx);
   }
 
   /** Find an arc near `(rx, ry)` within `tolScreenPx` CSS pixels. */
   private findNearArc(rx: number, ry: number, tolScreenPx = 8): SavedSketchArc | null {
-    const to = this.viewer.rasterToScreen.bind(this.viewer);
-    const pScreen = to(rx, ry);
-    const zoom = this.viewer.getEffectiveZoom();
-    let best: SavedSketchArc | null = null;
-    let bestDist = tolScreenPx;
-    for (const a of this.arcs) {
-      const center = this.points.find((p) => p.id === a.center);
-      if (!center) continue;
-      const sc = to(center.x, center.y);
-      const d = Math.abs(Math.hypot(pScreen.x - sc.x, pScreen.y - sc.y) - a.radius * zoom);
-      if (d <= bestDist && isAngleInArc(Math.atan2(ry - center.y, rx - center.x), a.start, a.end)) {
-        bestDist = d;
-        best = a;
-      }
-    }
-    return best;
+    return hitTestNearArc(this.hitTestEnv(), this.points, this.arcs, rx, ry, tolScreenPx);
   }
 
   private nextPointId(): number {
@@ -981,53 +863,17 @@ export class SketchController {
   }
 
   /** Sub-pixel snap to a dark raster line/corner within `r = 8 px` on the PDF/image scan. */
-  private snapRasterPoint(
+  snapRasterPoint(
     pt: { x: number; y: number },
     altKey = false,
   ): { x: number; y: number; snapped: boolean } {
     if (!this.rasterSnapEnabled || altKey || !this.grayCache) {
       return { x: pt.x, y: pt.y, snapped: false };
     }
-    const { data, width, height } = this.grayCache;
-    const r = 8;
-    const u0 = Math.max(1, Math.floor(pt.x - r));
-    const u1 = Math.min(width - 2, Math.ceil(pt.x + r));
-    const v0 = Math.max(1, Math.floor(pt.y - r));
-    const v1 = Math.min(height - 2, Math.ceil(pt.y + r));
-
-    let bestScore = 0;
-    let bestU = pt.x;
-    let bestV = pt.y;
-    for (let v = v0; v <= v1; v += 1) {
-      for (let u = u0; u <= u1; u += 1) {
-        const dist = Math.hypot(u + 0.5 - pt.x, v + 0.5 - pt.y);
-        if (dist > r) continue;
-        const darkness = 255 - data[v * width + u];
-        if (darkness < 28) continue;
-        const score = darkness / (1 + 0.25 * dist);
-        if (score > bestScore) {
-          bestScore = score;
-          const dL = 255 - data[v * width + (u - 1)];
-          const dR = 255 - data[v * width + (u + 1)];
-          const dU = 255 - data[(v - 1) * width + u];
-          const dD = 255 - data[(v + 1) * width + u];
-          const denomX = dL - 2 * darkness + dR;
-          const denomY = dU - 2 * darkness + dD;
-          const dx =
-            Math.abs(denomX) > 1e-3 ? Math.max(-0.5, Math.min(0.5, (0.5 * (dL - dR)) / denomX)) : 0;
-          const dy =
-            Math.abs(denomY) > 1e-3 ? Math.max(-0.5, Math.min(0.5, (0.5 * (dU - dD)) / denomY)) : 0;
-          bestU = u + 0.5 + dx;
-          bestV = v + 0.5 + dy;
-        }
-      }
-    }
-    return bestScore > 0
-      ? { x: bestU, y: bestV, snapped: true }
-      : { x: pt.x, y: pt.y, snapped: false };
+    return snapToDarkRidge(this.grayCache, pt);
   }
 
-  private snapInputCoord(x: number, y: number, altKey = false): { x: number; y: number } {
+  snapInputCoord(x: number, y: number, altKey = false): { x: number; y: number } {
     if (altKey) return { x, y };
     // 1. Always prioritize snapping to an existing sketch vertex within 16 CSS px for 100% line continuity!
     const existing = this.findNearPoint(x, y, 16);
@@ -1082,24 +928,7 @@ export class SketchController {
 
   /** Return all point IDs connected to `ptId` via Coincident constraints (including `ptId` itself). */
   private getCoincidentCluster(ptId: number): number[] {
-    const visited = new Set<number>([ptId]);
-    const queue = [ptId];
-    while (queue.length > 0) {
-      const cur = queue.shift()!;
-      for (const c of this.constraints) {
-        if ('Coincident' in c) {
-          const [a, b] = (c as { Coincident: number[] }).Coincident;
-          if (a === cur && !visited.has(b)) {
-            visited.add(b);
-            queue.push(b);
-          } else if (b === cur && !visited.has(a)) {
-            visited.add(a);
-            queue.push(a);
-          }
-        }
-      }
-    }
-    return [...visited];
+    return coincidentCluster(this.constraints, ptId);
   }
 
   /** Keep every arc's start/end angles and its endpoint vertices (`startPt`, `endPt`) 100% continuous. */
@@ -1456,7 +1285,7 @@ export class SketchController {
         this.dragState = null;
         this.dragMoved = false;
         // Revert the pushUndo() that `start` made in anticipation of a drag.
-        this.undoStack.pop();
+        this.history.discardLast();
         if (kind === 'point') toggleInArray(this.selectedPoints, id);
         else if (kind === 'line') toggleInArray(this.selectedLines, id);
         else if (kind === 'circle') toggleInArray(this.selectedCircles, id);
@@ -2519,7 +2348,7 @@ export class SketchController {
     }
   }
 
-  private isPointLocked(ptId: number): boolean {
+  isPointLocked(ptId: number): boolean {
     const cp = this.lastSolve?.constrained_params;
     if (!cp) return false;
     const idx = this.points.findIndex((p) => p.id === ptId);
@@ -2527,7 +2356,7 @@ export class SketchController {
     return Boolean(cp[2 * idx] && cp[2 * idx + 1]);
   }
 
-  private isCircleLocked(circleId: number): boolean {
+  isCircleLocked(circleId: number): boolean {
     const cp = this.lastSolve?.constrained_params;
     if (!cp) return false;
     const cIdx = this.circles.findIndex((c) => c.id === circleId);
@@ -2538,687 +2367,10 @@ export class SketchController {
   }
 
   drawOverlay(ctx: CanvasRenderingContext2D): void {
-    if (
-      !this.active &&
-      this.points.length === 0 &&
-      this.lines.length === 0 &&
-      this.circles.length === 0 &&
-      this.arcs.length === 0
-    ) {
-      return;
-    }
-    const to = this.viewer.rasterToScreen.bind(this.viewer);
-    const m = this.viewer.getCombinedTransform();
-    const accent = getComputedStyle(this.panel).getPropertyValue('--color-accent').trim() || '#2465c7';
-    const success = '#16a34a'; // FreeCAD Fully Constrained Green
-    const constructionColor = '#3b82f6'; // FreeCAD Construction Blue
-    const selectColor = '#0ea5e9'; // FreeCAD Selection Cyan
-    const hoverColor = '#f59f00'; // Hover highlight Gold
-    const warning = getComputedStyle(this.panel).getPropertyValue('--color-warning').trim() || '#b54708';
-    const danger = getComputedStyle(this.panel).getPropertyValue('--color-danger').trim() || '#dc2626';
-
-    const lineColor = (l: SavedSketchLine): string => {
-      if (this.selectedLines.includes(l.id)) return selectColor;
-      if (this.hoverEntity?.kind === 'line' && this.hoverEntity.id === l.id) return hoverColor;
-      if (this.lastSolve && this.lastSolve.conflicting.length > 0) return danger;
-      if (l.construction) return constructionColor;
-      const stat = this.lastFit?.primitive_stats?.find((s) => s.kind === 'line' && s.id === l.id);
-      if (stat) {
-        if (stat.rms_px < 0.3) return success;
-        if (stat.rms_px < 1.0) return warning;
-        return danger;
-      }
-      if ((this.lastSolve && this.lastSolve.dof === 0) || (this.isPointLocked(l.a) && this.isPointLocked(l.b))) {
-        return success;
-      }
-      return accent;
-    };
-
-    ctx.save();
-    ctx.lineWidth = 2.25;
-    ctx.font = '12px Arial, sans-serif';
-
-    // Lines.
-    for (const l of this.lines) {
-      const pa = this.points.find((p) => p.id === l.a);
-      const pb = this.points.find((p) => p.id === l.b);
-      if (!pa || !pb) continue;
-      const a = to(pa.x, pa.y);
-      const b = to(pb.x, pb.y);
-      const isHi =
-        this.selectedLines.includes(l.id) ||
-        (this.hoverEntity?.kind === 'line' && this.hoverEntity.id === l.id);
-      ctx.strokeStyle = lineColor(l);
-      ctx.lineWidth = isHi ? 3.25 : 2.25;
-      ctx.setLineDash(l.construction ? [6, 4] : []);
-      ctx.beginPath();
-      ctx.moveTo(a.x, a.y);
-      ctx.lineTo(b.x, b.y);
-      ctx.stroke();
-    }
-
-    // Circles (path built in raster space via combined transform m so zoom/rotation is 100% locked).
-    for (const c of this.circles) {
-      const center = this.points.find((p) => p.id === c.center);
-      if (!center) continue;
-      const isSel = this.selectedCircles.includes(c.id);
-      const isHov = this.hoverEntity?.kind === 'circle' && this.hoverEntity.id === c.id;
-      ctx.strokeStyle = isSel
-        ? selectColor
-        : isHov
-          ? hoverColor
-          : c.construction
-            ? constructionColor
-            : this.isCircleLocked(c.id) || (this.lastSolve && this.lastSolve.dof === 0)
-              ? success
-              : accent;
-      ctx.lineWidth = isSel || isHov ? 3.25 : 2.25;
-      ctx.setLineDash(c.construction ? [6, 4] : []);
-      ctx.save();
-      ctx.transform(m[0], m[1], m[2], m[3], m[4], m[5]);
-      ctx.beginPath();
-      ctx.arc(center.x, center.y, c.radius, 0, Math.PI * 2);
-      ctx.restore();
-      ctx.stroke();
-    }
-
-    // Arcs (path built in raster space via combined transform m so zoom/rotation is 100% locked).
-    for (const a of this.arcs) {
-      const center = this.points.find((p) => p.id === a.center);
-      if (!center) continue;
-      const isSel = this.selectedArcs.includes(a.id);
-      const isHov = this.hoverEntity?.kind === 'arc' && this.hoverEntity.id === a.id;
-      ctx.strokeStyle = isSel
-        ? selectColor
-        : isHov
-          ? hoverColor
-          : a.construction
-            ? constructionColor
-            : this.lastSolve && this.lastSolve.dof === 0
-              ? success
-              : accent;
-      ctx.lineWidth = isSel || isHov ? 3.25 : 2.25;
-      ctx.setLineDash(a.construction ? [6, 4] : []);
-      ctx.save();
-      ctx.transform(m[0], m[1], m[2], m[3], m[4], m[5]);
-      ctx.beginPath();
-      ctx.arc(center.x, center.y, a.radius, a.start, a.end);
-      ctx.restore();
-      ctx.stroke();
-
-      // Draw endpoint & midpoint grab handles when arc is selected or hovered
-      if (isSel || isHov) {
-        ctx.save();
-        ctx.setLineDash([]);
-        const sx = center.x + a.radius * Math.cos(a.start);
-        const sy = center.y + a.radius * Math.sin(a.start);
-        const ex = center.x + a.radius * Math.cos(a.end);
-        const ey = center.y + a.radius * Math.sin(a.end);
-        const midAng = a.start + (((a.end - a.start) % (2 * Math.PI) + 2 * Math.PI) % (2 * Math.PI)) / 2;
-        const mx = center.x + a.radius * Math.cos(midAng);
-        const my = center.y + a.radius * Math.sin(midAng);
-        for (const hp of [to(sx, sy), to(mx, my), to(ex, ey)]) {
-          ctx.fillStyle = '#ffffff';
-          ctx.strokeStyle = isSel ? selectColor : hoverColor;
-          ctx.lineWidth = 2;
-          ctx.fillRect(hp.x - 4, hp.y - 4, 8, 8);
-          ctx.strokeRect(hp.x - 4, hp.y - 4, 8, 8);
-        }
-        ctx.restore();
-      }
-    }
-
-    ctx.setLineDash([]);
-
-    // Points.
-    for (const p of this.points) {
-      const s = to(p.x, p.y);
-      const selected = this.selectedPoints.includes(p.id);
-      const hovered = this.hoverEntity?.kind === 'point' && this.hoverEntity.id === p.id;
-      const locked = this.isPointLocked(p.id) || (this.lastSolve && this.lastSolve.dof === 0);
-      if (selected || hovered) {
-        ctx.save();
-        ctx.strokeStyle = selected ? selectColor : hoverColor;
-        ctx.lineWidth = 2;
-        ctx.beginPath();
-        ctx.arc(s.x, s.y, 9, 0, Math.PI * 2);
-        ctx.stroke();
-        ctx.restore();
-      }
-      ctx.fillStyle = selected ? selectColor : hovered ? hoverColor : locked ? success : '#e03131';
-      ctx.beginPath();
-      ctx.arc(s.x, s.y, selected || hovered ? 5.5 : 4, 0, Math.PI * 2);
-      ctx.fill();
-    }
-
-    // Draw FreeCAD Marquee Box Selection (Left-to-Right = Window Blue, Right-to-Left = Crossing Green)
-    if (this.dragState?.kind === 'box' && this.lastMouse) {
-      const x0 = this.dragState.x0;
-      const y0 = this.dragState.y0;
-      const x1 = this.lastMouse.x;
-      const y1 = this.lastMouse.y;
-      const crossing = x1 < x0;
-      const rx = Math.min(x0, x1);
-      const ry = Math.min(y0, y1);
-      const rw = Math.abs(x1 - x0);
-      const rh = Math.abs(y1 - y0);
-      ctx.save();
-      ctx.fillStyle = crossing ? 'rgba(34, 197, 94, 0.14)' : 'rgba(14, 165, 233, 0.14)';
-      ctx.strokeStyle = crossing ? '#22c55e' : '#0ea5e9';
-      ctx.lineWidth = 1.75;
-      ctx.setLineDash(crossing ? [6, 4] : []);
-      ctx.fillRect(rx, ry, rw, rh);
-      ctx.strokeRect(rx, ry, rw, rh);
-      ctx.setLineDash([]);
-      ctx.fillStyle = crossing ? '#15803d' : '#0369a1';
-      ctx.font = 'bold 11px Arial, sans-serif';
-      ctx.fillText(crossing ? 'Presijecajući izbor' : 'Izbor okvirom', rx + 6, Math.max(14, ry - 5));
-      ctx.restore();
-    }
-
-    // Highlight (0,0) Origin bullseye when hovered or in 'origin' tool
-    if (this.tool === 'origin' || this.hoverEntity?.kind === 'origin') {
-      const orig = this.viewer.getOrigin();
-      const os = to(orig.x, orig.y);
-      ctx.save();
-      ctx.strokeStyle = hoverColor;
-      ctx.lineWidth = 2.25;
-      ctx.beginPath();
-      ctx.arc(os.x, os.y, 11, 0, Math.PI * 2);
-      ctx.stroke();
-      ctx.restore();
-    }
-
-    // On-Canvas FreeCAD Constraint Glyphs & Dimension Leaders
-    this.drawConstraintsOverlay(ctx, to, danger, constructionColor);
-
-    // Live cursor snap highlight + rubber-band preview when active.
-    if (this.active && this.lastMouse) {
-      if (this.activeConstraintTool) {
-        ctx.save();
-        ctx.fillStyle = 'rgba(15, 23, 42, 0.86)';
-        const badgeText = `Ograničenje: ${this.activeConstraintTool} (klikni elemente · Esc za izlaz)`;
-        const bw = ctx.measureText(badgeText).width + 14;
-        ctx.fillRect(this.lastMouse.x + 14, this.lastMouse.y + 14, bw, 22);
-        ctx.fillStyle = '#38bdf8';
-        ctx.font = 'bold 11px Arial, sans-serif';
-        ctx.fillText(badgeText, this.lastMouse.x + 21, this.lastMouse.y + 29);
-        ctx.restore();
-      }
-      if (this.tool !== 'select') {
-        const toolText = this.toolLabel();
-        ctx.save();
-        ctx.font = 'bold 11px Arial, sans-serif';
-        const bw = ctx.measureText(toolText).width + 14;
-        ctx.fillStyle = 'rgba(15, 23, 42, 0.88)';
-        ctx.fillRect(this.lastMouse.x + 14, this.lastMouse.y - 32, bw, 20);
-        ctx.fillStyle = '#7dd3fc';
-        ctx.fillText(toolText, this.lastMouse.x + 21, this.lastMouse.y - 18);
-        ctx.restore();
-      }
-      const rect = ctx.canvas.getBoundingClientRect();
-      const curRaster = this.viewer.clientToRaster(
-        rect.left + this.lastMouse.x,
-        rect.top + this.lastMouse.y,
-      );
-      if (curRaster) {
-        const snapPt = !this.lastMouse.altKey
-          ? this.findNearPoint(curRaster.x, curRaster.y, 16)
-          : null;
-        if (snapPt) {
-          const sp = to(snapPt.x, snapPt.y);
-          ctx.save();
-          ctx.strokeStyle = success;
-          ctx.lineWidth = 2.25;
-          ctx.beginPath();
-          ctx.arc(sp.x, sp.y, 9, 0, Math.PI * 2);
-          ctx.stroke();
-          ctx.fillStyle = success;
-          ctx.font = 'bold 11px Arial, sans-serif';
-          ctx.fillText('● Podud.', sp.x + 11, sp.y - 8);
-          ctx.restore();
-        }
-
-        const rSnap =
-          !snapPt && this.rasterSnapEnabled && this.grayCache
-            ? this.snapRasterPoint(curRaster, this.lastMouse.altKey)
-            : { x: curRaster.x, y: curRaster.y, snapped: false };
-        if (rSnap.snapped) {
-          const rsp = to(rSnap.x, rSnap.y);
-          ctx.save();
-          ctx.strokeStyle = '#d9480f';
-          ctx.lineWidth = 1.75;
-          ctx.beginPath();
-          ctx.arc(rsp.x, rsp.y, 6, 0, Math.PI * 2);
-          ctx.moveTo(rsp.x - 9, rsp.y);
-          ctx.lineTo(rsp.x + 9, rsp.y);
-          ctx.moveTo(rsp.x, rsp.y - 9);
-          ctx.lineTo(rsp.x, rsp.y + 9);
-          ctx.stroke();
-          ctx.restore();
-        }
-
-        const snappedCoord = snapPt
-          ? { x: snapPt.x, y: snapPt.y }
-          : rSnap.snapped
-            ? { x: rSnap.x, y: rSnap.y }
-            : this.snapInputCoord(curRaster.x, curRaster.y, this.lastMouse.altKey);
-        const targetX = snappedCoord.x;
-        const targetY = snappedCoord.y;
-        const targetScreen = to(targetX, targetY);
-        const scaleMm = this.getScaleMm();
-        const unitLabel = 'mm';
-
-        if (this.pending) {
-          const pendPt =
-            this.pending.pointId !== undefined
-              ? this.points.find((p) => p.id === this.pending!.pointId)
-              : null;
-          const pendX = pendPt ? pendPt.x : this.pending.x;
-          const pendY = pendPt ? pendPt.y : this.pending.y;
-          const startScreen = to(pendX, pendY);
-          ctx.save();
-          ctx.strokeStyle = accent;
-          ctx.fillStyle = accent;
-          ctx.setLineDash([5, 4]);
-          ctx.beginPath();
-          ctx.arc(startScreen.x, startScreen.y, 4.5, 0, Math.PI * 2);
-          ctx.fill();
-
-          if (this.tool === 'line' || this.tool === 'polyline') {
-            const dx = targetX - pendX;
-            const dy = targetY - pendY;
-            const len = Math.hypot(dx, dy);
-            const deg = (Math.atan2(-dy, dx) * 180) / Math.PI;
-            let hvBadge = this.tool === 'polyline' && this.polyMode !== 'line' ? ` [${this.polyMode}]` : '';
-            if (this.autoConstraints && !this.lastMouse.altKey && len > 2 && hvBadge === '') {
-              if (Math.abs(dy) / len < Math.sin((5 * Math.PI) / 180)) hvBadge = ' [H]';
-              else if (Math.abs(dx) / len < Math.sin((5 * Math.PI) / 180)) hvBadge = ' [V]';
-            }
-            ctx.beginPath();
-            ctx.moveTo(startScreen.x, startScreen.y);
-            ctx.lineTo(targetScreen.x, targetScreen.y);
-            ctx.stroke();
-            ctx.fillText(
-              `${(len * scaleMm).toFixed(1)} ${unitLabel} · ${deg.toFixed(1)}°${hvBadge}`,
-              targetScreen.x + 10,
-              targetScreen.y - 10,
-            );
-          } else if (this.tool === 'rect' || this.tool === 'roundedRect') {
-            const w = targetScreen.x - startScreen.x;
-            const h = targetScreen.y - startScreen.y;
-            ctx.strokeRect(startScreen.x, startScreen.y, w, h);
-            const rw = Math.abs(targetX - pendX) * scaleMm;
-            const rh = Math.abs(targetY - pendY) * this.getScaleMm('y');
-            ctx.fillText(
-              `${rw.toFixed(1)} × ${rh.toFixed(1)} ${unitLabel}`,
-              targetScreen.x + 10,
-              targetScreen.y - 10,
-            );
-          } else if (this.tool === 'centerRect') {
-            const hw = Math.abs(targetScreen.x - startScreen.x);
-            const hh = Math.abs(targetScreen.y - startScreen.y);
-            ctx.strokeRect(startScreen.x - hw, startScreen.y - hh, hw * 2, hh * 2);
-          } else if (this.tool === 'circle' || this.tool === 'polygon' || this.tool === 'arc') {
-            const rPx = Math.hypot(targetX - pendX, targetY - pendY);
-            ctx.save();
-            ctx.transform(m[0], m[1], m[2], m[3], m[4], m[5]);
-            ctx.beginPath();
-            ctx.arc(pendX, pendY, rPx, 0, Math.PI * 2);
-            ctx.restore();
-            ctx.stroke();
-            ctx.beginPath();
-            ctx.moveTo(startScreen.x, startScreen.y);
-            ctx.lineTo(targetScreen.x, targetScreen.y);
-            ctx.stroke();
-            ctx.fillText(
-              `R ${(rPx * scaleMm).toFixed(1)} ${unitLabel}`,
-              targetScreen.x + 10,
-              targetScreen.y - 10,
-            );
-          } else if (this.tool === 'slot') {
-            ctx.beginPath();
-            ctx.moveTo(startScreen.x, startScreen.y);
-            ctx.lineTo(targetScreen.x, targetScreen.y);
-            ctx.stroke();
-          }
-          ctx.restore();
-        } else if (this.arcStartPending) {
-          const center = this.points.find((p) => p.id === this.arcStartPending!.centerId);
-          if (center) {
-            const sc = to(center.x, center.y);
-            const rawEnd = Math.atan2(targetY - center.y, targetX - center.x);
-            let sweep =
-              ((rawEnd - this.arcStartPending.startAngle) % (2 * Math.PI) + 2 * Math.PI) %
-              (2 * Math.PI);
-            if (sweep < 1e-3) sweep = Math.PI;
-            const startAngle = this.lastMouse.altKey ? rawEnd : this.arcStartPending.startAngle;
-            const endAngle = this.lastMouse.altKey
-              ? rawEnd + (2 * Math.PI - sweep)
-              : startAngle + sweep;
-            const endRimScreen = to(
-              center.x + this.arcStartPending.radius * Math.cos(rawEnd),
-              center.y + this.arcStartPending.radius * Math.sin(rawEnd),
-            );
-            ctx.save();
-            ctx.strokeStyle = accent;
-            ctx.fillStyle = accent;
-            ctx.setLineDash([5, 4]);
-            ctx.save();
-            ctx.transform(m[0], m[1], m[2], m[3], m[4], m[5]);
-            ctx.beginPath();
-            ctx.arc(center.x, center.y, this.arcStartPending.radius, startAngle, endAngle);
-            ctx.restore();
-            ctx.stroke();
-            ctx.beginPath();
-            ctx.moveTo(sc.x, sc.y);
-            ctx.lineTo(endRimScreen.x, endRimScreen.y);
-            ctx.stroke();
-            const degSweep = (((endAngle - startAngle) * 180) / Math.PI).toFixed(1);
-            ctx.fillText(
-              `R ${(this.arcStartPending.radius * scaleMm).toFixed(1)} ${unitLabel} · Δ∠ ${degSweep}°`,
-              endRimScreen.x + 10,
-              endRimScreen.y - 10,
-            );
-            ctx.restore();
-          }
-        } else if (this.arc3PtPending) {
-          const s1 = to(this.arc3PtPending.x1, this.arc3PtPending.y1);
-          ctx.save();
-          ctx.strokeStyle = accent;
-          ctx.fillStyle = accent;
-          ctx.setLineDash([5, 4]);
-          if (this.arc3PtPending.p2Id === undefined) {
-            ctx.beginPath();
-            ctx.moveTo(s1.x, s1.y);
-            ctx.lineTo(targetScreen.x, targetScreen.y);
-            ctx.stroke();
-            const chord = Math.hypot(targetX - this.arc3PtPending.x1, targetY - this.arc3PtPending.y1);
-            ctx.fillText(
-              `Tetiva ${(chord * scaleMm).toFixed(1)} ${unitLabel}`,
-              targetScreen.x + 10,
-              targetScreen.y - 10,
-            );
-          } else {
-            const circ = circumcircleArc(
-              this.arc3PtPending.x1,
-              this.arc3PtPending.y1,
-              this.arc3PtPending.x2!,
-              this.arc3PtPending.y2!,
-              targetX,
-              targetY,
-            );
-            if (circ) {
-              ctx.save();
-              ctx.transform(m[0], m[1], m[2], m[3], m[4], m[5]);
-              ctx.beginPath();
-              ctx.arc(circ.cx, circ.cy, circ.radius, circ.startAngle, circ.endAngle);
-              ctx.restore();
-              ctx.stroke();
-              ctx.fillText(
-                `R ${(circ.radius * scaleMm).toFixed(1)} ${unitLabel}`,
-                targetScreen.x + 10,
-                targetScreen.y - 10,
-              );
-            }
-          }
-          ctx.restore();
-        } else if (this.polyArcPending) {
-          const pa = this.polyArcPending;
-          const circ = circumcircleArc(pa.ax, pa.ay, pa.bx, pa.by, targetX, targetY);
-          ctx.save();
-          ctx.strokeStyle = accent;
-          ctx.fillStyle = accent;
-          ctx.setLineDash([5, 4]);
-          if (circ) {
-            ctx.save();
-            ctx.transform(m[0], m[1], m[2], m[3], m[4], m[5]);
-            ctx.beginPath();
-            ctx.arc(circ.cx, circ.cy, circ.radius, circ.startAngle, circ.endAngle);
-            ctx.restore();
-            ctx.stroke();
-            ctx.fillText(
-              `R ${(circ.radius * scaleMm).toFixed(1)} ${unitLabel}`,
-              targetScreen.x + 10,
-              targetScreen.y - 10,
-            );
-          }
-          ctx.restore();
-        }
-        if (this.loupeEnabled) {
-          this.drawSketchLoupe(ctx, this.lastMouse.x, this.lastMouse.y, targetX, targetY, accent);
-        }
-      }
-    } else if (this.pending) {
-      const s = to(this.pending.x, this.pending.y);
-      ctx.beginPath();
-      ctx.arc(s.x, s.y, 4, 0, Math.PI * 2);
-      ctx.fill();
-    }
-    ctx.restore();
+    drawSketchOverlay(this, ctx);
   }
 
-  private drawSketchLoupe(
-    ctx: CanvasRenderingContext2D,
-    mouseX: number,
-    mouseY: number,
-    rasterX: number,
-    rasterY: number,
-    accent: string,
-  ): void {
-    const page = this.viewer.getPage();
-    if (!page || page.levels.length === 0) return;
-    const level0 = page.levels[0];
-    const radius = 56;
-    const mag = 8;
-    const srcSpan = (radius * 2) / mag;
-    const cx = mouseX > radius * 2 + 30 ? mouseX - radius - 22 : mouseX + radius + 22;
-    const cy = mouseY > radius * 2 + 30 ? mouseY - radius - 22 : mouseY + radius + 22;
-
-    ctx.save();
-    ctx.beginPath();
-    ctx.arc(cx, cy, radius, 0, Math.PI * 2);
-    ctx.clip();
-    ctx.fillStyle = '#ffffff';
-    ctx.fillRect(cx - radius, cy - radius, radius * 2, radius * 2);
-    ctx.imageSmoothingEnabled = false;
-
-    const tileSize = 256;
-    const u0 = rasterX - srcSpan / 2;
-    const v0 = rasterY - srcSpan / 2;
-    const col0 = Math.max(0, Math.floor(u0 / tileSize));
-    const row0 = Math.max(0, Math.floor(v0 / tileSize));
-    const col1 = Math.min(level0.tileCols - 1, Math.floor((u0 + srcSpan) / tileSize));
-    const row1 = Math.min(level0.tileRows - 1, Math.floor((v0 + srcSpan) / tileSize));
-    for (let r = row0; r <= row1; r += 1) {
-      for (let c = col0; c <= col1; c += 1) {
-        const tile = level0.tiles[r * level0.tileCols + c];
-        if (!tile) continue;
-        const dx = cx - radius + (c * tileSize - u0) * mag;
-        const dy = cy - radius + (r * tileSize - v0) * mag;
-        ctx.drawImage(tile, dx, dy, tile.width * mag, tile.height * mag);
-      }
-    }
-    ctx.restore();
-
-    ctx.save();
-    ctx.strokeStyle = accent;
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.arc(cx, cy, radius, 0, Math.PI * 2);
-    ctx.stroke();
-    ctx.strokeStyle = '#d9480f';
-    ctx.lineWidth = 1.25;
-    ctx.beginPath();
-    ctx.moveTo(cx - 10, cy);
-    ctx.lineTo(cx + 10, cy);
-    ctx.moveTo(cx, cy - 10);
-    ctx.lineTo(cx, cy + 10);
-    ctx.stroke();
-    ctx.restore();
-  }
-
-  private drawConstraintsOverlay(
-    ctx: CanvasRenderingContext2D,
-    to: (rx: number, ry: number) => { x: number; y: number },
-    drivingColor: string,
-    refColor: string,
-  ): void {
-    this.dimBadgeRects = [];
-    ctx.save();
-    ctx.font = 'bold 11px Arial, sans-serif';
-
-    this.constraints.forEach((c, idx) => {
-      const key = Object.keys(c)[0];
-      const val = (c as Record<string, unknown>)[key];
-      const isRef = this.referenceConstraints.includes(idx);
-      const dimColor = isRef ? refColor : drivingColor;
-
-      const drawBadge = (
-        sx: number,
-        sy: number,
-        text: string,
-        color = '#d9480f',
-        clickableIdx?: number,
-      ): void => {
-        const w = ctx.measureText(text).width + 8;
-        ctx.fillStyle =
-          clickableIdx !== undefined && this.editingConstraintIdx === clickableIdx
-            ? '#fef08a'
-            : 'rgba(255, 255, 255, 0.92)';
-        ctx.fillRect(sx - w / 2, sy - 9, w, 16);
-        ctx.strokeStyle = color;
-        ctx.lineWidth =
-          clickableIdx !== undefined && this.editingConstraintIdx === clickableIdx ? 2 : 1;
-        ctx.strokeRect(sx - w / 2, sy - 9, w, 16);
-        ctx.fillStyle = color;
-        ctx.fillText(text, sx - w / 2 + 4, sy + 3);
-        if (clickableIdx !== undefined) {
-          this.dimBadgeRects.push({
-            cIdx: clickableIdx,
-            x: sx - w / 2 - 4,
-            y: sy - 11,
-            w: w + 8,
-            h: 20,
-          });
-        }
-      };
-
-      if (key === 'Horizontal' || key === 'Vertical') {
-        const l = this.lines.find((x) => x.id === (val as number));
-        if (!l) return;
-        const pa = this.points.find((p) => p.id === l.a);
-        const pb = this.points.find((p) => p.id === l.b);
-        if (!pa || !pb) return;
-        const a = to(pa.x, pa.y);
-        const b = to(pb.x, pb.y);
-        drawBadge((a.x + b.x) / 2, (a.y + b.y) / 2 - 12, key === 'Horizontal' ? 'H' : 'V');
-      } else if (key === 'Parallel' || key === 'Perpendicular' || key === 'EqualLength') {
-        const arr = val as number[];
-        const l = this.lines.find((x) => x.id === arr[0]);
-        if (!l) return;
-        const pa = this.points.find((p) => p.id === l.a);
-        const pb = this.points.find((p) => p.id === l.b);
-        if (!pa || !pb) return;
-        const a = to(pa.x, pa.y);
-        const b = to(pb.x, pb.y);
-        const sym = key === 'Parallel' ? '∥' : key === 'Perpendicular' ? '⊥' : '=';
-        drawBadge((a.x + b.x) / 2 + 12, (a.y + b.y) / 2 + 12, sym);
-      } else if (key === 'Coincident') {
-        const arr = val as number[];
-        const pt = this.points.find((p) => p.id === arr[0]);
-        if (!pt) return;
-        const s = to(pt.x, pt.y);
-        ctx.save();
-        ctx.strokeStyle = '#d9480f';
-        ctx.lineWidth = 1.75;
-        ctx.beginPath();
-        ctx.arc(s.x, s.y, 7.5, 0, Math.PI * 2);
-        ctx.stroke();
-        ctx.restore();
-      } else if (key === 'FixedPoint') {
-        const arr = val as number[];
-        const pt = this.points.find((p) => p.id === arr[0]);
-        if (!pt) return;
-        const s = to(pt.x, pt.y);
-        drawBadge(s.x + 12, s.y - 10, '🔒');
-      } else if (key === 'Distance' || key === 'HorizontalDistance' || key === 'VerticalDistance') {
-        const arr = val as number[];
-        const p1 = this.points.find((p) => p.id === arr[0]);
-        const p2 = this.points.find((p) => p.id === arr[1]);
-        if (!p1 || !p2) return;
-        const a = to(p1.x, p1.y);
-        const b = to(p2.x, p2.y);
-        const mmVal = (this.dimensionDisplayValue(c, idx) ?? 0).toFixed(1);
-        const prefix = key === 'HorizontalDistance' ? 'ΔX ' : key === 'VerticalDistance' ? 'ΔY ' : '';
-        ctx.strokeStyle = dimColor;
-        ctx.lineWidth = 1;
-        ctx.setLineDash([3, 3]);
-        ctx.beginPath();
-        ctx.moveTo(a.x, a.y - 18);
-        ctx.lineTo(b.x, b.y - 18);
-        ctx.stroke();
-        ctx.setLineDash([]);
-        drawBadge(
-          (a.x + b.x) / 2,
-          (a.y + b.y) / 2 - 22,
-          `${prefix}${mmVal} mm`,
-          dimColor,
-          isRef ? undefined : idx,
-        );
-      } else if (key === 'DistancePointLine') {
-        const arr = val as number[];
-        const pt = this.points.find((p) => p.id === arr[0]);
-        if (!pt) return;
-        const s = to(pt.x, pt.y);
-        const mmVal = (this.dimensionDisplayValue(c, idx) ?? 0).toFixed(1);
-        drawBadge(s.x + 18, s.y - 18, `${mmVal} mm`, dimColor, isRef ? undefined : idx);
-      } else if (key === 'LineLength') {
-        const arr = val as number[];
-        const l = this.lines.find((x) => x.id === arr[0]);
-        if (!l) return;
-        const pa = this.points.find((p) => p.id === l.a);
-        const pb = this.points.find((p) => p.id === l.b);
-        if (!pa || !pb) return;
-        const a = to(pa.x, pa.y);
-        const b = to(pb.x, pb.y);
-        const mmVal = (this.dimensionDisplayValue(c, idx) ?? 0).toFixed(1);
-        drawBadge(
-          (a.x + b.x) / 2,
-          (a.y + b.y) / 2 - 22,
-          `${mmVal} mm`,
-          dimColor,
-          isRef ? undefined : idx,
-        );
-      } else if (key === 'Radius' || key === 'Diameter' || key === 'ArcRadius') {
-        const arr = val as number[];
-        const entity =
-          key === 'ArcRadius'
-            ? this.arcs.find((x) => x.id === arr[0])
-            : this.circles.find((x) => x.id === arr[0]);
-        if (!entity) return;
-        const center = this.points.find((p) => p.id === entity.center);
-        if (!center) return;
-        const sc = to(center.x, center.y);
-        const mmVal = (this.dimensionDisplayValue(c, idx) ?? 0).toFixed(1);
-        const prefix = key === 'Diameter' ? '⌀ ' : 'R ';
-        drawBadge(sc.x + 24, sc.y - 18, `${prefix}${mmVal} mm`, dimColor, isRef ? undefined : idx);
-      } else if (key === 'Angle' || key === 'AngleLine') {
-        const arr = val as number[];
-        const l = this.lines.find((x) => x.id === arr[0]);
-        if (!l) return;
-        const pa = this.points.find((p) => p.id === l.a);
-        if (!pa) return;
-        const sa = to(pa.x, pa.y);
-        const degVal = (this.dimensionDisplayValue(c, idx) ?? 0).toFixed(1);
-        drawBadge(sa.x + 22, sa.y - 16, `∠ ${degVal}°`, dimColor, isRef ? undefined : idx);
-      }
-    });
-
-    ctx.restore();
-  }
-
-  private dimensionDisplayValue(constraint: Record<string, unknown>, idx: number): number | null {
+  dimensionDisplayValue(constraint: Record<string, unknown>, idx: number): number | null {
     const key = Object.keys(constraint)[0];
     if (!isDimensionKey(key)) return null;
     const scale = this.viewer.getWorldScale();
@@ -3297,7 +2449,7 @@ export class SketchController {
     }
   }
 
-  private async solveSilent(): Promise<void> {
+  async solveSilent(): Promise<void> {
     if (this.points.length === 0) return;
     if (this.constraints.length === 0) {
       this.syncArcsWithEndpoints();
@@ -3639,7 +2791,7 @@ export class SketchController {
       return value !== null && isValidDimensionValue(key, value) ? value : null;
     };
     const rejectDimension = (): void => {
-      this.undoStack.pop();
+      this.history.discardLast();
       this.onStatus(t(this.locale, 'sketch.invalidDimension'), true);
     };
     let added = false;
@@ -3888,7 +3040,7 @@ export class SketchController {
     }
 
     if (!added) {
-      this.undoStack.pop();
+      this.history.discardLast();
       this.onStatus(t(this.locale, 'sketch.selectForConstraint'), true);
       return;
     }
@@ -3896,7 +3048,7 @@ export class SketchController {
     void this.solve();
   }
 
-  private addConstraintFromUi(type: string, e1: number, e2: number, val: number): void {
+  addConstraintFromUi(type: string, e1: number, e2: number, val: number): void {
     const scale = this.viewer.getWorldScale();
     let constraint: Record<string, unknown>;
     switch (type) {
@@ -3981,7 +3133,7 @@ export class SketchController {
     void this.solve();
   }
 
-  private updateDimensionFromEditor(): void {
+  updateDimensionFromEditor(): void {
     const idx = this.editingConstraintIdx;
     if (idx === null) return;
     const constraint = this.constraints[idx];
@@ -4009,7 +3161,7 @@ export class SketchController {
     void this.solve();
   }
 
-  private removeConstraintAt(idx: number): void {
+  removeConstraintAt(idx: number): void {
     this.constraints.splice(idx, 1);
     this.referenceConstraints = this.referenceConstraints
       .filter((i) => i !== idx)
@@ -4020,570 +3172,7 @@ export class SketchController {
     }
   }
 
-  private render(): void {
-    const locale = this.locale;
-    const dof = this.getDof();
-    const redundant = this.lastSolve?.redundant ?? [];
-    const conflicting = this.lastSolve?.conflicting ?? [];
-
-    const solverBannerHtml =
-      conflicting.length > 0
-        ? `<button id="sketch-remove-conflict" class="btn sketch-banner sketch-banner-conflict" type="button">⚠ ${tf(locale, 'sketch.conflictWarn', { list: conflicting.map((i) => `#${i + 1}`).join(', ') })}</button>`
-        : redundant.length > 0
-          ? `<button id="sketch-remove-redundant" class="btn sketch-banner sketch-banner-redundant" type="button">⚠ ${tf(locale, 'sketch.redundantWarn', { list: redundant.map((i) => `#${i + 1}`).join(', ') })}</button>`
-          : dof === 0 && this.points.length > 0
-            ? `<div class="sketch-status sketch-status-ok">✓ ${t(locale, 'sketch.fullyConstrained')}</div>`
-            : `<div class="sketch-status sketch-status-hint">${tf(locale, 'sketch.underConstrained', { dof })}</div>`;
-
-    const selectionSummary = [
-      ...this.selectedPoints.map((id) => `Pt#${id}`),
-      ...this.selectedLines.map((id) => `Ln#${id}`),
-      ...this.selectedCircles.map((id) => `Cir#${id}`),
-      ...this.selectedArcs.map((id) => `Arc#${id}`),
-    ].join(', ');
-
-    const constraintsHtml = this.constraints
-      .map((c, idx) => {
-        const key = Object.keys(c)[0] ?? 'Ograničenje';
-        const val = JSON.stringify((c as Record<string, unknown>)[key]);
-        const isRef = this.referenceConstraints.includes(idx);
-        const isConflict = conflicting.includes(idx);
-        const isRedundant = redundant.includes(idx);
-        return `
-          <li class="cal-segment${isConflict ? ' segment-conflict' : isRedundant ? ' segment-redundant' : ''}">
-            <input type="checkbox" class="sketch-c-ref" data-index="${idx}" ${!isRef ? 'checked' : ''} title="Aktivno" />
-            <span class="cal-label">#${idx + 1} ${escapeHtml(key)} ${escapeHtml(val)}</span>
-            <button class="sketch-c-del tool-btn cal-delete" type="button" data-index="${idx}" aria-label="Obriši">×</button>
-          </li>`;
-      })
-      .join('');
-
-    const dimensionEditorHtml = (() => {
-      const idx = this.editingConstraintIdx;
-      if (idx === null) return '';
-      const constraint = this.constraints[idx];
-      const key = constraint ? Object.keys(constraint)[0] : undefined;
-      if (!constraint || !key || !isDimensionKey(key) || this.referenceConstraints.includes(idx)) return '';
-      const value = this.dimensionDisplayValue(constraint, idx);
-      if (value === null) return '';
-      const unit = key === 'Angle' || key === 'AngleLine' ? '°' : 'mm';
-      const label = tf(locale, 'sketch.editDimension', { index: idx + 1, unit });
-      return `
-        <div class="sketch-toolbar-box sketch-dimension-editor">
-          <label class="cal-label" for="sketch-dimension-value">${escapeHtml(label)}</label>
-          <div class="cal-actions">
-            <input id="sketch-dimension-value" class="cal-length" type="number" step="any" value="${value.toFixed(3)}" />
-            <button id="sketch-dimension-apply" class="btn btn-primary" type="button">${t(locale, 'calibrate.apply')}</button>
-            <button id="sketch-dimension-cancel" class="btn" type="button">${t(locale, 'account.cancel')}</button>
-          </div>
-        </div>`;
-    })();
-
-    const elementsHtml = [
-      ...this.lines.map(
-        (l) =>
-          `<li class="cal-segment"><span class="cal-label">Linija #${l.id} (P${l.a}→P${l.b})${l.construction ? ' [C]' : ''}</span><button class="sketch-el-sel btn" type="button" data-kind="line" data-id="${l.id}">${this.selectedLines.includes(l.id) ? '✓' : 'Izb'}</button></li>`,
-      ),
-      ...this.circles.map(
-        (c) =>
-          `<li class="cal-segment"><span class="cal-label">Kružnica #${c.id} (R=${c.radius.toFixed(1)})${c.construction ? ' [C]' : ''}</span><button class="sketch-el-sel btn" type="button" data-kind="circle" data-id="${c.id}">${this.selectedCircles.includes(c.id) ? '✓' : 'Izb'}</button></li>`,
-      ),
-      ...this.arcs.map(
-        (a) =>
-          `<li class="cal-segment"><span class="cal-label">Luk #${a.id} (R=${a.radius.toFixed(1)})${a.construction ? ' [C]' : ''}</span><button class="sketch-el-sel btn" type="button" data-kind="arc" data-id="${a.id}">${this.selectedArcs.includes(a.id) ? '✓' : 'Izb'}</button></li>`,
-      ),
-    ].join('');
-
-    const orig = this.viewer.getOrigin();
-
-    this.panel.innerHTML = `
-      <div class="panel-head">
-        <h2 class="panel-title">${t(locale, 'sketch.title')}</h2>
-        <button id="sketch-close" class="tool-btn" type="button" aria-label="${t(locale, 'calibrate.close')}">×</button>
-      </div>
-      ${solverBannerHtml}
-      <p class="cal-hint">${selectionSummary ? `Izb: ${escapeHtml(selectionSummary)}` : t(locale, this.pending || this.arcStartPending || this.arc3PtPending ? 'sketch.finishChain' : 'sketch.hint')}</p>
-
-      <details class="sketch-toolbar-box" role="group" open aria-label="Izbor i koordinatni sistem">
-        <summary class="sketch-toolbar-title">1 · Izbor i koordinatni sistem (0,0)</summary>
-        <div class="cal-actions">
-          <button id="sketch-tool-select" class="btn ${this.tool === 'select' ? 'btn-tool-active' : ''}" type="button" title="${t(locale, 'sketch.tool.select')}">↖ Izaberi / Pomeri (V)</button>
-          <button id="sketch-tool-origin" class="btn ${this.tool === 'origin' ? 'btn-tool-active' : ''}" type="button" title="Pomeri (0,0) koordinatni početak">🎯 Postavi (0,0) [${Math.round(orig.x)}, ${Math.round(orig.y)}]</button>
-          <button id="sketch-origin-reset" class="btn" type="button" title="Resetuj (0,0) na donji levi ugao">↺ (0,0) Donji levi</button>
-          <button id="sketch-undo" class="btn" type="button" title="${t(locale, 'sketch.undo')}">↶</button>
-          <button id="sketch-redo" class="btn" type="button" title="${t(locale, 'sketch.redo')}">↷</button>
-          <button id="sketch-delete" class="btn" type="button" title="${t(locale, 'sketch.delete')}">🗑</button>
-        </div>
-        <div class="cal-actions">
-          <label class="cal-label"><input id="sketch-raster-snap" type="checkbox" ${this.rasterSnapEnabled ? 'checked' : ''} /> 🧲 Snap na raster</label>
-          <label class="cal-label"><input id="sketch-guide-snap" type="checkbox" ${this.guideSnapEnabled ? 'checked' : ''} /> 🧲 Snap na guide</label>
-          <label class="cal-label"><input id="sketch-pin-raster" type="checkbox" ${this.autoPinRaster ? 'checked' : ''} /> 📌 Prikvači na raster</label>
-          <label class="cal-label"><input id="sketch-loupe" type="checkbox" ${this.loupeEnabled ? 'checked' : ''} /> 🔍 8×</label>
-          <label class="cal-label"><input id="sketch-construction" type="checkbox" ${this.constructionMode ? 'checked' : ''} /> ${t(locale, 'sketch.construction')}</label>
-          <label class="cal-label"><input id="sketch-auto" type="checkbox" ${this.autoConstraints ? 'checked' : ''} /> ${t(locale, 'sketch.autoConstraint')}</label>
-          <label class="cal-label"><input id="sketch-grid-snap" type="checkbox" ${this.viewer.isGridSnapEnabled() ? 'checked' : ''} /> ${t(locale, 'sketch.gridSnap')}</label>
-        </div>
-      </details>
-
-      <details class="sketch-toolbar-box" role="group" open aria-label="Alati za geometriju">
-        <summary class="sketch-toolbar-title">2 · Crtanje i izmena geometrije</summary>
-        <div class="cal-actions">
-          <button id="sketch-tool-polyline" class="btn ${this.tool === 'polyline' ? 'btn-tool-active' : ''}" type="button" title="${t(locale, 'sketch.tool.polyline')}">Polilinija (P)</button>
-          <button id="sketch-tool-line" class="btn ${this.tool === 'line' ? 'btn-tool-active' : ''}" type="button" title="${t(locale, 'sketch.tool.line')}">╱ Linija (L)</button>
-          <button id="sketch-tool-rect" class="btn ${this.tool === 'rect' ? 'btn-tool-active' : ''}" type="button" title="${t(locale, 'sketch.tool.rect')}">▭ Pravougaonik (R)</button>
-          <button id="sketch-tool-rounded-rect" class="btn ${this.tool === 'roundedRect' ? 'btn-tool-active' : ''}" type="button" title="${t(locale, 'sketch.tool.roundedRect')}">▢ Zaoblj. prav.</button>
-          <button id="sketch-tool-center-rect" class="btn ${this.tool === 'centerRect' ? 'btn-tool-active' : ''}" type="button" title="${t(locale, 'sketch.tool.centerRect')}">⊡ C-Prav.</button>
-          <button id="sketch-tool-slot" class="btn ${this.tool === 'slot' ? 'btn-tool-active' : ''}" type="button" title="${t(locale, 'sketch.tool.slot')}">⬭ Slot (S)</button>
-          <button id="sketch-tool-circle" class="btn ${this.tool === 'circle' ? 'btn-tool-active' : ''}" type="button" title="${t(locale, 'sketch.tool.circle')}">◯ Kružnica (C)</button>
-          <button id="sketch-tool-arc" class="btn ${this.tool === 'arc' ? 'btn-tool-active' : ''}" type="button" title="Luk centar-početak-kraj (A)">◜ Luk C-P-K (A)</button>
-          <button id="sketch-tool-arc3pt" class="btn ${this.tool === 'arc3pt' ? 'btn-tool-active' : ''}" type="button" title="Luk 3 tačke (Shift+A ili M)">⌒ Luk 3T</button>
-          <button id="sketch-tool-polygon" class="btn ${this.tool === 'polygon' ? 'btn-tool-active' : ''}" type="button" title="${t(locale, 'sketch.tool.polygon')}">⬡ Poligon (G)</button>
-          <button id="sketch-tool-fillet" class="btn ${this.tool === 'fillet' ? 'btn-tool-active' : ''}" type="button" title="${t(locale, 'sketch.tool.fillet')}">╭ Zaobljenje (F)</button>
-          <button id="sketch-tool-chamfer" class="btn ${this.tool === 'chamfer' ? 'btn-tool-active' : ''}" type="button" title="${t(locale, 'sketch.tool.chamfer')}">╱ Kosa ivica</button>
-          <button id="sketch-tool-trim" class="btn ${this.tool === 'trim' ? 'btn-tool-active' : ''}" type="button" title="${t(locale, 'sketch.tool.trim')}">✂ Odseci (T)</button>
-          <button id="sketch-tool-mirror" class="btn ${this.tool === 'mirror' ? 'btn-tool-active' : ''}" type="button" title="${t(locale, 'sketch.tool.mirror')}">⇋ Ogledalo</button>
-          <button id="sketch-tool-point" class="btn ${this.tool === 'point' ? 'btn-tool-active' : ''}" type="button" title="${t(locale, 'sketch.tool.point')}">• Tačka (O)</button>
-        </div>
-        ${this.tool === 'fillet' ? `
-          <div class="cal-actions">
-            <label class="cal-label" for="sketch-fillet-radius">${t(locale, 'sketch.fillet.radius')}</label>
-            <input id="sketch-fillet-radius" class="cal-length" type="number" min="0" step="any" placeholder="auto" value="${this.filletRadiusMm ?? ''}" />
-          </div>` : this.tool === 'chamfer' ? `
-          <div class="cal-actions">
-            <label class="cal-label" for="sketch-chamfer-d1">${t(locale, 'sketch.chamfer.d1')}</label>
-            <input id="sketch-chamfer-d1" class="cal-length" type="number" min="0" step="any" value="${this.chamferFirstMm}" />
-            <label class="cal-label" for="sketch-chamfer-d2">${t(locale, 'sketch.chamfer.d2')}</label>
-            <input id="sketch-chamfer-d2" class="cal-length" type="number" min="0" step="any" value="${this.chamferSecondMm}" />
-          </div>` : this.tool === 'roundedRect' ? `
-          <div class="cal-actions">
-            <label class="cal-label" for="sketch-rounded-radius">${t(locale, 'sketch.roundedRect.radius')}</label>
-            <input id="sketch-rounded-radius" class="cal-length" type="number" min="0" step="any" placeholder="auto" value="${this.roundedRectRadiusMm ?? ''}" />
-          </div>` : ''}
-        ${
-          this.pending || this.arcStartPending || this.arc3PtPending
-            ? `<div class="cal-actions"><button id="sketch-finish-chain" class="btn btn-primary" type="button">${t(locale, 'sketch.finishChain')}</button></div>`
-            : ''
-        }
-      </details>
-
-      <details class="sketch-toolbar-box" role="group" aria-label="Geometrijska ograničenja">
-        <summary class="sketch-toolbar-title">3 · Geometrijska ograničenja</summary>
-        <div class="cal-actions">
-          <button class="btn sketch-fc-c" data-action="Coincident" type="button" title="Podudarnost (2 tačke)">● Podud.</button>
-          <button class="btn sketch-fc-c" data-action="PointOnObject" type="button" title="Tačka na objektu">⟐ NaObj</button>
-          <button class="btn sketch-fc-c" data-action="Horizontal" type="button" title="Horizontalno (H)">━ H</button>
-          <button class="btn sketch-fc-c" data-action="Vertical" type="button" title="Vertikalno">┃ V</button>
-          <button class="btn sketch-fc-c" data-action="Parallel" type="button" title="Paralelno">∥ Par</button>
-          <button class="btn sketch-fc-c" data-action="Perpendicular" type="button" title="Normalno (N)">⊥ Norm</button>
-          <button class="btn sketch-fc-c" data-action="Tangent" type="button" title="Tangenta">⌓ Tan</button>
-          <button class="btn sketch-fc-c" data-action="Equal" type="button" title="Jednako (E)">= Jedn</button>
-          <button class="btn sketch-fc-c" data-action="Symmetric" type="button" title="Simetrija">>< Sim</button>
-          <button class="btn sketch-fc-c" data-action="Midpoint" type="button" title="Središte">M Sred</button>
-          <button class="btn sketch-fc-c" data-action="Collinear" type="button" title="Kolinearno">∥ Kol</button>
-          <button class="btn sketch-fc-c" data-action="Block" type="button" title="Fiksiraj na raster (B)">🔒 Fiks</button>
-        </div>
-      </details>
-
-      <details class="sketch-toolbar-box" role="group" aria-label="Dimenziona ograničenja">
-        <summary class="sketch-toolbar-title">4 · Dimenziona ograničenja</summary>
-        <div class="cal-actions">
-          <button class="btn sketch-fc-c" data-action="Distance" type="button" title="Rastojanje / dužina (D)">↔ Rast</button>
-          <button class="btn sketch-fc-c" data-action="HorizontalDistance" type="button" title="Horizontalno rastojanje">ΔX</button>
-          <button class="btn sketch-fc-c" data-action="VerticalDistance" type="button" title="Vertikalno rastojanje">ΔY</button>
-          <button class="btn sketch-fc-c" data-action="Radius" type="button" title="Poluprečnik">R Pol</button>
-          <button class="btn sketch-fc-c" data-action="Diameter" type="button" title="Prečnik">⌀ Pre</button>
-          <button class="btn sketch-fc-c" data-action="Angle" type="button" title="Ugao">∠ Ugao</button>
-        </div>
-        <div class="cal-actions">
-          <select id="sketch-c-type" class="cal-orientation" aria-label="${t(locale, 'sketch.constraints')}">
-            <option value="Horizontal">Horizontalno (linija)</option>
-            <option value="Vertical">Vertikalno (linija)</option>
-            <option value="HorizontalPoints">Horizontalno (p1, p2)</option>
-            <option value="VerticalPoints">Vertikalno (p1, p2)</option>
-            <option value="LineLength">Dužina linije (linija, d)</option>
-            <option value="Distance">Rastojanje (p1, p2, d)</option>
-            <option value="DistancePointLine">Rast. tačka-linija (tačka, linija, d)</option>
-            <option value="HorizontalDistance">Horiz. rast. (p1, p2, d)</option>
-            <option value="VerticalDistance">Vert. rast. (p1, p2, d)</option>
-            <option value="Parallel">Paralelno (l1, l2)</option>
-            <option value="Perpendicular">Normalno (l1, l2)</option>
-            <option value="TangentLineCircle">Tangenta (linija, kružnica)</option>
-            <option value="EqualLength">Jednake dužine (l1, l2)</option>
-            <option value="EqualRadius">Jednak poluprečnik (c1, c2)</option>
-            <option value="Coincident">Podudarnost (p1, p2)</option>
-            <option value="PointOnLine">Tačka na liniji (tačka, linija)</option>
-            <option value="PointOnCircle">Tačka na kružnici (tačka, kružnica)</option>
-            <option value="Midpoint">Središte (tačka, linija)</option>
-            <option value="Collinear">Kolinearno (l1, l2)</option>
-            <option value="Radius">Poluprečnik (kružnica, r)</option>
-            <option value="Diameter">Prečnik (kružnica, d)</option>
-            <option value="Angle">Ugao (l1, l2, °)</option>
-            <option value="AngleLine">Ugao linije (linija, °)</option>
-            <option value="FixedPoint">Fiksna tačka (tačka)</option>
-          </select>
-          <input id="sketch-c-e1" class="cal-length w-38" type="number" value="1" aria-label="ID 1" />
-          <input id="sketch-c-e2" class="cal-length w-38" type="number" value="2" aria-label="ID 2" />
-          <input id="sketch-c-val" class="cal-length w-54" type="number" step="any" placeholder="auto" aria-label="Vrijednost" />
-          <button id="sketch-c-add" class="btn" type="button">+</button>
-        </div>
-      </details>
-
-      <details class="sketch-toolbar-box" role="group" open aria-label="Rešavanje, fit i izvoz">
-        <summary class="sketch-toolbar-title">5 · Rešavanje, RasterFit i izvoz</summary>
-        <div class="cal-actions">
-          <button id="sketch-solve" class="btn btn-primary" type="button">${t(locale, 'sketch.solve')}</button>
-          <button id="sketch-fit" class="btn" type="button">${t(locale, 'sketch.fit')}</button>
-          <button id="sketch-fit-preview" class="btn" type="button">${t(locale, 'sketch.fitPreview')}</button>
-          ${this.preFitSnapshot ? `<button id="sketch-fit-cancel" class="btn" type="button">${t(locale, 'sketch.fitCancel')}</button>` : ''}
-          <button id="sketch-clear" class="btn" type="button">${t(locale, 'sketch.clear')}</button>
-        </div>
-        <div class="cal-actions">
-          <button id="export-dxf" class="btn" type="button">${t(locale, 'sketch.exportDxf')}</button>
-          <button id="export-svg" class="btn" type="button">${t(locale, 'sketch.exportSvg')}</button>
-          <button id="export-json" class="btn" type="button">${t(locale, 'sketch.exportJson')}</button>
-          <button id="export-csv" class="btn" type="button">${t(locale, 'sketch.exportCsv')}</button>
-        </div>
-      </details>
-
-      <details class="mb-8">
-        <summary class="cal-subhead cursor-pointer">${t(locale, 'sketch.fitDialog')}</summary>
-        <div class="cal-actions mt-6">
-          <label class="cal-label"><input id="fit-opt-geom" type="checkbox" ${this.fitOpts.fitGeometry ? 'checked' : ''} /> ${t(locale, 'sketch.fitGeometry')}</label>
-          <label class="cal-label"><input id="fit-opt-rot" type="checkbox" ${this.fitOpts.fitRotation ? 'checked' : ''} /> ${t(locale, 'sketch.fitRotation')}</label>
-          <label class="cal-label"><input id="fit-opt-trans" type="checkbox" ${this.fitOpts.fitTranslation ? 'checked' : ''} /> ${t(locale, 'sketch.fitTranslation')}</label>
-          <label class="cal-label"><input id="fit-opt-scale" type="checkbox" ${this.fitOpts.fitScale ? 'checked' : ''} /> ${t(locale, 'sketch.fitScale')}</label>
-          <label class="cal-label"><input id="fit-opt-const" type="checkbox" ${this.fitOpts.includeConstruction ? 'checked' : ''} /> ${t(locale, 'sketch.construction')}</label>
-        </div>
-      </details>
-
-      ${dimensionEditorHtml}
-      ${constraintsHtml ? `<ol class="cal-segments">${constraintsHtml}</ol>` : ''}
-      ${elementsHtml ? `<details class="mb-8"><summary class="cal-subhead cursor-pointer">${t(locale, 'sketch.elements')} (${this.lines.length + this.circles.length + this.arcs.length})</summary><ol class="cal-segments">${elementsHtml}</ol></details>` : ''}
-
-      <p class="cal-empty" id="sketch-result">${escapeHtml(this.resultText)}</p>
-    `;
-
-    const dimensionInput = this.panel.querySelector<HTMLInputElement>('#sketch-dimension-value');
-    dimensionInput?.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' || e.key === 'Escape') {
-        e.preventDefault();
-        e.stopPropagation();
-        if (e.key === 'Enter') this.updateDimensionFromEditor();
-        else this.finishChain();
-      }
-    });
-    this.panel.querySelector('#sketch-dimension-apply')?.addEventListener('click', () => {
-      this.updateDimensionFromEditor();
-    });
-    this.panel.querySelector('#sketch-dimension-cancel')?.addEventListener('click', () => this.finishChain());
-    dimensionInput?.focus();
-    dimensionInput?.select();
-
-    this.panel.querySelector('#sketch-close')!.addEventListener('click', () => this.deactivate());
-    this.panel.querySelector('#sketch-tool-polyline')!.addEventListener('click', () => this.setTool('polyline'));
-    this.panel.querySelector('#sketch-tool-line')!.addEventListener('click', () => this.setTool('line'));
-    this.panel.querySelector('#sketch-tool-rect')!.addEventListener('click', () => this.setTool('rect'));
-    this.panel.querySelector('#sketch-tool-rounded-rect')!.addEventListener('click', () => this.setTool('roundedRect'));
-    this.panel.querySelector('#sketch-tool-center-rect')!.addEventListener('click', () => this.setTool('centerRect'));
-    this.panel.querySelector('#sketch-tool-slot')!.addEventListener('click', () => this.setTool('slot'));
-    this.panel.querySelector('#sketch-tool-circle')!.addEventListener('click', () => this.setTool('circle'));
-    this.panel.querySelector('#sketch-tool-arc')!.addEventListener('click', () => this.setTool('arc'));
-    this.panel.querySelector('#sketch-tool-arc3pt')!.addEventListener('click', () => this.setTool('arc3pt'));
-    this.panel.querySelector('#sketch-tool-polygon')!.addEventListener('click', () => this.setTool('polygon'));
-    this.panel.querySelector('#sketch-tool-fillet')!.addEventListener('click', () => this.setTool('fillet'));
-    this.panel.querySelector('#sketch-tool-chamfer')!.addEventListener('click', () => this.setTool('chamfer'));
-    this.panel.querySelector('#sketch-tool-trim')!.addEventListener('click', () => this.setTool('trim'));
-    this.panel.querySelector('#sketch-tool-mirror')!.addEventListener('click', () => this.setTool('mirror'));
-    this.panel.querySelector('#sketch-tool-point')!.addEventListener('click', () => this.setTool('point'));
-    this.panel.querySelector('#sketch-tool-select')!.addEventListener('click', () => this.setTool('select'));
-    this.panel.querySelector('#sketch-tool-origin')!.addEventListener('click', () => this.setTool('origin'));
-    this.panel.querySelector('#sketch-origin-reset')!.addEventListener('click', () => {
-      this.viewer.resetOrigin();
-      const o = this.viewer.getOrigin();
-      this.onStatus(`(0,0) → (${o.x.toFixed(0)}, ${o.y.toFixed(0)}) px`);
-      this.render();
-    });
-
-    const optionalRadius = (id: string, assign: (value: number | null) => void): void => {
-      this.panel.querySelector<HTMLInputElement>(id)?.addEventListener('change', (event) => {
-        const value = Number((event.target as HTMLInputElement).value);
-        assign(Number.isFinite(value) && value > 0 ? value : null);
-      });
-    };
-    optionalRadius('#sketch-fillet-radius', (value) => { this.filletRadiusMm = value; });
-    optionalRadius('#sketch-rounded-radius', (value) => { this.roundedRectRadiusMm = value; });
-    this.panel.querySelector<HTMLInputElement>('#sketch-chamfer-d1')?.addEventListener('change', (event) => {
-      const value = Number((event.target as HTMLInputElement).value);
-      if (Number.isFinite(value) && value > 0) this.chamferFirstMm = value;
-    });
-    this.panel.querySelector<HTMLInputElement>('#sketch-chamfer-d2')?.addEventListener('change', (event) => {
-      const value = Number((event.target as HTMLInputElement).value);
-      if (Number.isFinite(value) && value > 0) this.chamferSecondMm = value;
-    });
-
-    this.panel.querySelector('#sketch-finish-chain')?.addEventListener('click', () => {
-      this.finishChain();
-    });
-    this.panel.querySelector('#sketch-remove-conflict')?.addEventListener('click', () => {
-      if (conflicting.length > 0) {
-        this.pushUndo();
-        this.removeConstraintAt(conflicting[conflicting.length - 1]);
-        void this.solve();
-      }
-    });
-    this.panel.querySelector('#sketch-remove-redundant')?.addEventListener('click', () => {
-      if (redundant.length > 0) {
-        this.pushUndo();
-        this.removeConstraintAt(redundant[redundant.length - 1]);
-        void this.solve();
-      }
-    });
-
-    this.panel.querySelector<HTMLInputElement>('#sketch-raster-snap')?.addEventListener('change', (e) => {
-      this.rasterSnapEnabled = (e.target as HTMLInputElement).checked;
-      document.documentElement.dataset.rasterSnap = String(this.rasterSnapEnabled);
-      this.viewer.requestRender();
-    });
-    this.panel.querySelector<HTMLInputElement>('#sketch-guide-snap')?.addEventListener('change', (e) => {
-      this.guideSnapEnabled = (e.target as HTMLInputElement).checked;
-      document.documentElement.dataset.guideSnap = String(this.guideSnapEnabled);
-      this.viewer.requestRender();
-    });
-    this.panel.querySelector<HTMLInputElement>('#sketch-pin-raster')?.addEventListener('change', (e) => {
-      this.autoPinRaster = (e.target as HTMLInputElement).checked;
-    });
-    this.panel.querySelector<HTMLInputElement>('#sketch-loupe')?.addEventListener('change', (e) => {
-      this.loupeEnabled = (e.target as HTMLInputElement).checked;
-      this.viewer.requestRender();
-    });
-    this.panel.querySelector<HTMLInputElement>('#sketch-construction')!.addEventListener('change', (e) => {
-      this.constructionMode = (e.target as HTMLInputElement).checked;
-    });
-    this.panel.querySelector<HTMLInputElement>('#sketch-auto')!.addEventListener('change', (e) => {
-      this.autoConstraints = (e.target as HTMLInputElement).checked;
-    });
-    this.panel.querySelector<HTMLInputElement>('#sketch-grid-snap')!.addEventListener('change', (e) => {
-      this.viewer.setGridSnapEnabled((e.target as HTMLInputElement).checked);
-    });
-
-    this.panel.querySelectorAll<HTMLButtonElement>('.sketch-fc-c').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        const action = btn.dataset.action;
-        if (action) this.applyConstraintAction(action);
-      });
-    });
-
-    this.panel.querySelectorAll<HTMLButtonElement>('.sketch-el-sel').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        const kind = btn.dataset.kind;
-        const id = Number(btn.dataset.id);
-        if (kind === 'line') toggleInArray(this.selectedLines, id);
-        else if (kind === 'circle') toggleInArray(this.selectedCircles, id);
-        else if (kind === 'arc') toggleInArray(this.selectedArcs, id);
-        this.render();
-        this.viewer.requestRender();
-      });
-    });
-
-    this.panel.querySelector('#sketch-solve')!.addEventListener('click', () => void this.solve());
-    this.panel.querySelector('#sketch-fit')!.addEventListener('click', () => void this.fit(false));
-    this.panel.querySelector('#sketch-fit-preview')!.addEventListener('click', () => void this.fit(true));
-    this.panel.querySelector('#sketch-fit-cancel')?.addEventListener('click', () => this.cancelFitPreview());
-    this.panel.querySelector('#sketch-undo')!.addEventListener('click', () => this.undo());
-    this.panel.querySelector('#sketch-redo')!.addEventListener('click', () => this.redo());
-    this.panel.querySelector('#sketch-delete')!.addEventListener('click', () => this.deleteSelected());
-    this.panel.querySelector('#sketch-clear')!.addEventListener('click', () => this.clear());
-
-    this.panel.querySelector<HTMLInputElement>('#fit-opt-geom')?.addEventListener('change', (e) => {
-      this.fitOpts.fitGeometry = (e.target as HTMLInputElement).checked;
-    });
-    this.panel.querySelector<HTMLInputElement>('#fit-opt-rot')?.addEventListener('change', (e) => {
-      this.fitOpts.fitRotation = (e.target as HTMLInputElement).checked;
-    });
-    this.panel.querySelector<HTMLInputElement>('#fit-opt-trans')?.addEventListener('change', (e) => {
-      this.fitOpts.fitTranslation = (e.target as HTMLInputElement).checked;
-    });
-    this.panel.querySelector<HTMLInputElement>('#fit-opt-scale')?.addEventListener('change', (e) => {
-      this.fitOpts.fitScale = (e.target as HTMLInputElement).checked;
-    });
-    this.panel.querySelector<HTMLInputElement>('#fit-opt-const')?.addEventListener('change', (e) => {
-      this.fitOpts.includeConstruction = (e.target as HTMLInputElement).checked;
-    });
-
-    this.panel.querySelector('#sketch-c-add')!.addEventListener('click', () => {
-      const type = (this.panel.querySelector('#sketch-c-type') as HTMLSelectElement).value;
-      const e1 = Number((this.panel.querySelector('#sketch-c-e1') as HTMLInputElement).value);
-      const e2 = Number((this.panel.querySelector('#sketch-c-e2') as HTMLInputElement).value);
-      const val = Number((this.panel.querySelector('#sketch-c-val') as HTMLInputElement).value);
-      this.addConstraintFromUi(type, e1, e2, val);
-    });
-
-    this.panel.querySelectorAll<HTMLInputElement>('.sketch-c-ref').forEach((el) => {
-      const idx = Number(el.dataset.index);
-      el.addEventListener('change', () => {
-        if (el.checked) {
-          this.referenceConstraints = this.referenceConstraints.filter((i) => i !== idx);
-        } else if (!this.referenceConstraints.includes(idx)) {
-          this.referenceConstraints.push(idx);
-          if (this.editingConstraintIdx === idx) this.editingConstraintIdx = null;
-        }
-        void this.solveSilent();
-        this.render();
-        this.viewer.requestRender();
-        this.onChange?.();
-      });
-    });
-
-    this.panel.querySelectorAll<HTMLButtonElement>('.sketch-c-del').forEach((el) => {
-      const idx = Number(el.dataset.index);
-      el.addEventListener('click', () => {
-        this.pushUndo();
-        this.removeConstraintAt(idx);
-        void this.solveSilent();
-        this.render();
-        this.viewer.requestRender();
-        this.onChange?.();
-      });
-    });
-
-    this.panel.querySelector('#export-dxf')!.addEventListener('click', () => void this.exportDxf());
-    this.panel.querySelector('#export-svg')!.addEventListener('click', () => void this.exportSvg());
-    this.panel.querySelector('#export-json')!.addEventListener('click', () => void this.exportReportJson());
-    this.panel.querySelector('#export-csv')!.addEventListener('click', () => void this.exportReportCsv());
+  render(): void {
+    renderSketchPanel(this);
   }
-}
-
-function toggleInArray(arr: number[], id: number): void {
-  const idx = arr.indexOf(id);
-  if (idx >= 0) arr.splice(idx, 1);
-  else arr.push(id);
-}
-
-function isAngleInArc(ang: number, start: number, end: number, tolRad = 0.2): boolean {
-  const twoPi = Math.PI * 2;
-  const sweep = ((end - start) % twoPi + twoPi) % twoPi || twoPi;
-  const rel = ((ang - start) % twoPi + twoPi) % twoPi;
-  return rel <= sweep + tolRad || rel >= twoPi - tolRad;
-}
-
-function circumcircleArc(
-  x1: number,
-  y1: number,
-  x2: number,
-  y2: number,
-  x3: number,
-  y3: number,
-): { cx: number; cy: number; radius: number; startAngle: number; endAngle: number } | null {
-  const d = 2 * (x1 * (y2 - y3) + x2 * (y3 - y1) + x3 * (y1 - y2));
-  if (Math.abs(d) < 1e-5) return null;
-  const s1 = x1 * x1 + y1 * y1;
-  const s2 = x2 * x2 + y2 * y2;
-  const s3 = x3 * x3 + y3 * y3;
-  const cx = (s1 * (y2 - y3) + s2 * (y3 - y1) + s3 * (y1 - y2)) / d;
-  const cy = (s1 * (x3 - x2) + s2 * (x1 - x3) + s3 * (x2 - x1)) / d;
-  const radius = Math.hypot(x1 - cx, y1 - cy);
-  if (!Number.isFinite(radius) || radius < 1 || radius > 1e6) return null;
-
-  const twoPi = Math.PI * 2;
-  const a1 = Math.atan2(y1 - cy, x1 - cx);
-  const a2 = Math.atan2(y2 - cy, x2 - cx);
-  const a3 = Math.atan2(y3 - cy, x3 - cx);
-  const sweep12 = ((a2 - a1) % twoPi + twoPi) % twoPi;
-  const sweep13 = ((a3 - a1) % twoPi + twoPi) % twoPi;
-
-  if (sweep13 <= sweep12) {
-    return { cx, cy, radius, startAngle: a1, endAngle: a1 + sweep12 };
-  }
-  return { cx, cy, radius, startAngle: a2, endAngle: a2 + (twoPi - sweep12) };
-}
-
-function distToSegment(
-  px: number,
-  py: number,
-  ax: number,
-  ay: number,
-  bx: number,
-  by: number,
-): number {
-  const dx = bx - ax;
-  const dy = by - ay;
-  const len2 = dx * dx + dy * dy;
-  if (len2 < 1e-9) return Math.hypot(px - ax, py - ay);
-  const t = Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / len2));
-  return Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
-}
-
-function projectPointToSegment(
-  px: number,
-  py: number,
-  ax: number,
-  ay: number,
-  bx: number,
-  by: number,
-): { x: number; y: number } {
-  const dx = bx - ax;
-  const dy = by - ay;
-  const len2 = dx * dx + dy * dy;
-  if (len2 < 1e-9) return { x: ax, y: ay };
-  const t = Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / len2));
-  return { x: ax + t * dx, y: ay + t * dy };
-}
-
-function segmentIntersectsRect(
-  ax: number,
-  ay: number,
-  bx: number,
-  by: number,
-  minX: number,
-  minY: number,
-  maxX: number,
-  maxY: number,
-): boolean {
-  if (
-    (ax >= minX && ax <= maxX && ay >= minY && ay <= maxY) ||
-    (bx >= minX && bx <= maxX && by >= minY && by <= maxY)
-  ) {
-    return true;
-  }
-  return (
-    segmentIntersectionT(ax, ay, bx, by, minX, minY, maxX, minY) !== null ||
-    segmentIntersectionT(ax, ay, bx, by, maxX, minY, maxX, maxY) !== null ||
-    segmentIntersectionT(ax, ay, bx, by, maxX, maxY, minX, maxY) !== null ||
-    segmentIntersectionT(ax, ay, bx, by, minX, maxY, minX, minY) !== null
-  );
-}
-
-function segmentIntersectionT(
-  x1: number,
-  y1: number,
-  x2: number,
-  y2: number,
-  x3: number,
-  y3: number,
-  x4: number,
-  y4: number,
-): number | null {
-  const denom = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4);
-  if (Math.abs(denom) < 1e-9) return null;
-  const t = ((x1 - x3) * (y3 - y4) - (y1 - y3) * (x3 - x4)) / denom;
-  const u = -((x1 - x2) * (y1 - y3) - (y1 - y2) * (x1 - x3)) / denom;
-  if (t >= 0 && t <= 1 && u >= 0 && u <= 1) return t;
-  return null;
-}
-
-function escapeHtml(s: string): string {
-  return s.replace(/[&<>"']/g, (c) => {
-    switch (c) {
-      case '&':
-        return '&amp;';
-      case '<':
-        return '&lt;';
-      case '>':
-        return '&gt;';
-      case '"':
-        return '&quot;';
-      default:
-        return '&#39;';
-    }
-  });
 }

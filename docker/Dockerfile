@@ -34,7 +34,7 @@ COPY server/requirements.txt /app/server/requirements.txt
 RUN pip install --no-cache-dir -r /app/server/requirements.txt
 
 COPY --from=rust-builder /app/target/release/rf-cli /usr/local/bin/rf-cli
-COPY server/app.py /app/server/app.py
+COPY server /app/server
 COPY --from=web /app/dist /app/web/dist
 
 ENV RF_CLI_BIN=/usr/local/bin/rf-cli

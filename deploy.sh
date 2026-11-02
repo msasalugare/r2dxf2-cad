@@ -31,7 +31,8 @@ else
   mkdir -p "${TMP_CTX}/server" "${TMP_CTX}/web"
   cp target/release/rf-cli "${TMP_CTX}/rf-cli"
   cp server/requirements.txt "${TMP_CTX}/server/requirements.txt"
-  cp server/app.py "${TMP_CTX}/server/app.py"
+  cp server/*.py "${TMP_CTX}/server/"
+  cp -r server/routers "${TMP_CTX}/server/routers"
   cp -r web/dist "${TMP_CTX}/web/dist"
   cat > "${TMP_CTX}/Dockerfile" <<'EOF'
 FROM python:3.12-slim
@@ -43,7 +44,7 @@ COPY server/requirements.txt /app/server/requirements.txt
 RUN pip install --no-cache-dir -r /app/server/requirements.txt
 COPY rf-cli /usr/local/bin/rf-cli
 RUN chmod +x /usr/local/bin/rf-cli
-COPY server/app.py /app/server/app.py
+COPY server /app/server
 COPY web/dist /app/web/dist
 ENV RF_CLI_BIN=/usr/local/bin/rf-cli
 ENV PYTHONUNBUFFERED=1
